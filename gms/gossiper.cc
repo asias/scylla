@@ -533,6 +533,8 @@ void gossiper::run() {
             do_status_check();
         }
 
+        logger.info("After do_status_check");
+
         //
         // Gossiper task runs only on CPU0:
         //
@@ -552,8 +554,10 @@ void gossiper::run() {
                 _shadow_live_endpoints = _live_endpoints;
             }
 
+            auto sem = make_shared<semaphore>(0);
+            logger.info("Before invoke_on_all");
             _the_gossiper.invoke_on_all([this, endpoint_map_changed,
-                live_endpoint_changed] (gossiper& local_gossiper) {
+                live_endpoint_changed, sem] (gossiper& local_gossiper) {
                 // Don't copy gossiper(CPU0) maps into themselves!
                 if (engine().cpu_id() != 0) {
                     if (endpoint_map_changed) {
@@ -564,8 +568,14 @@ void gossiper::run() {
                         local_gossiper._live_endpoints = _shadow_live_endpoints;
                     }
                 }
+            }).finally([sem] {
+                sem->signal();
+            });
+            sem->wait(std::chrono::seconds(10)).handle_exception([] (auto ep) {
+                logger.info("Fail to replicate gossip data to other nodes: {}", ep);
             }).get();
         }
+        logger.info("After invoke_on_all");
     }).then_wrapped([this] (auto&& f) {
         try {
             f.get();
@@ -579,6 +589,8 @@ void gossiper::run() {
                 logger.debug("ep={}, eps={}", x.first, x.second);
             }
         }
+    }).finally([this] {
+        logger.info("=== Gossip SET TIMER");
         _scheduled_gossip_task.arm(INTERVAL);
     });
 }
