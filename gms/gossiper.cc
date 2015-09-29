@@ -568,6 +568,7 @@ void gossiper::run() {
                         local_gossiper._live_endpoints = _shadow_live_endpoints;
                     }
                 }
+                logger.info("CPU{} replicated", engine().cpu_id());
             }).finally([sem] {
                 sem->signal();
             });
