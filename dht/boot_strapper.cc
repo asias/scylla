@@ -112,5 +112,4 @@ std::unordered_set<token> boot_strapper::get_random_tokens(token_metadata metada
     return tokens;
 }
 
-
 } // namespace dht

@@ -157,7 +157,7 @@ future<> send_mutations(lw_shared_ptr<send_info> si) {
 
 future<> send_mutation_fragments(lw_shared_ptr<send_info> si) {
     size_t estimated_partitions = si->estimate_partitions();
-    sslog.info("[Stream #{}] Start sending ks={}, cf={}, estimated_partitions={}, with new rpc streaming", si->plan_id, si->cf.schema()->ks_name(), si->cf.schema()->cf_name(), estimated_partitions);
+    sslog.debug("[Stream #{}] Start sending ks={}, cf={}, estimated_partitions={}, with new rpc streaming", si->plan_id, si->cf.schema()->ks_name(), si->cf.schema()->cf_name(), estimated_partitions);
     return netw::get_local_messaging_service().make_sink_and_source_for_stream_mutation_fragments(si->reader.schema()->version(), si->plan_id, si->cf_id, estimated_partitions, si->reason, si->id).then([si] (rpc::sink<frozen_mutation_fragment> sink, rpc::source<int32_t> source) mutable {
         auto got_error_from_peer = make_lw_shared<bool>(false);
 

@@ -75,6 +75,12 @@ namespace service {
 
 class load_broadcaster;
 class storage_service;
+class addnode_info;
+
+enum class boot_status : int8_t {
+    all_nodes_can_stream,
+    all_nodes_stream_done,
+};
 
 extern distributed<storage_service> _the_storage_service;
 inline distributed<storage_service>& get_storage_service() {
@@ -138,6 +144,7 @@ private:
     bool _ms_stopped = false;
     bool _stream_manager_stopped = false;
     seastar::metrics::metric_groups _metrics;
+    shared_ptr<addnode_info> _addnode_info;
 public:
     storage_service(distributed<database>& db, sharded<auth::service>&, sharded<db::system_distributed_keyspace>&);
     void isolate_on_error();
@@ -153,6 +160,12 @@ private:
     void register_metrics();
 
 public:
+    shared_ptr<addnode_info> get_addnode_info() {
+        return _addnode_info;
+    }
+    void set_addnode_info(shared_ptr<addnode_info> addnode_info) {
+        _addnode_info = std::move(addnode_info);
+    }
     future<> keyspace_changed(const sstring& ks_name);
     future<> update_pending_ranges();
     void update_pending_ranges_nowait(inet_address endpoint);
@@ -511,6 +524,10 @@ private:
     void set_mode(mode m, sstring msg, bool log);
 public:
     void bootstrap(std::unordered_set<token> tokens);
+
+    std::unordered_set<dht::token> bootstrap_multiple_node_in_parallel();
+
+    bool is_addnode_mode();
 
     bool is_bootstrap_mode() {
         return _is_bootstrap_mode;
@@ -1832,6 +1849,8 @@ public:
      * @param hostIdString token for the node
      */
     future<> removenode(sstring host_id_string);
+
+    future<> addnode(uint32_t num_nodes);
 
     future<sstring> get_operation_mode();
 

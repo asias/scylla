@@ -442,6 +442,10 @@ static constexpr unsigned do_get_rpc_client_idx(messaging_verb verb) {
     case messaging_verb::REPLICATION_FINISHED:
     case messaging_verb::REPAIR_CHECKSUM_RANGE:
     case messaging_verb::STREAM_MUTATION_FRAGMENTS:
+    case messaging_verb::ADDNODE_GET_TOKENS:
+    case messaging_verb::ADDNODE_GET_RANGES:
+    case messaging_verb::ADDNODE_SET_STREAM_DONE:
+    case messaging_verb::ADDNODE_GET_CLUSTER_STATUS:
         return 2;
     case messaging_verb::MUTATION_DONE:
     case messaging_verb::MUTATION_FAILED:
@@ -999,6 +1003,53 @@ future<partition_checksum> messaging_service::send_repair_checksum_range(
     return send_message<partition_checksum>(this,
             messaging_verb::REPAIR_CHECKSUM_RANGE, std::move(id),
             std::move(keyspace), std::move(cf), std::move(range), hash_version);
+}
+
+// Wrapper for ADDNODE_GET_TOKENS
+void messaging_service::register_addnode_get_tokens(std::function<future<std::unordered_set<dht::token>> (const rpc::client_info& cinfo, uint32_t num_tokens)>&& f) {
+    register_handler(this, messaging_verb::ADDNODE_GET_TOKENS, std::move(f));
+}
+void messaging_service::unregister_addnode_get_tokens() {
+    _rpc->unregister_handler(messaging_verb::ADDNODE_GET_TOKENS);
+}
+future<std::unordered_set<dht::token>> messaging_service::send_addnode_get_tokens(msg_addr id, uint32_t num_tokens) {
+    return send_message<std::unordered_set<dht::token>>(this, messaging_verb::ADDNODE_GET_TOKENS, std::move(id), num_tokens);
+}
+
+// Wrapper for ADDNODE_GET_RANGES
+void messaging_service::register_addnode_get_ranges(std::function<future<std::unordered_map<sstring, std::unordered_map<gms::inet_address, dht::token_range_vector>>> (const rpc::client_info& cinfo)>&& f) {
+    register_handler(this, messaging_verb::ADDNODE_GET_RANGES, std::move(f));
+}
+void messaging_service::unregister_addnode_get_ranges() {
+    _rpc->unregister_handler(messaging_verb::ADDNODE_GET_RANGES);
+}
+future<std::unordered_map<sstring, std::unordered_map<gms::inet_address, dht::token_range_vector>>> 
+messaging_service::send_addnode_get_ranges(msg_addr id) {
+    return send_message<std::unordered_map<sstring, std::unordered_map<gms::inet_address, dht::token_range_vector>>>(this, messaging_verb::ADDNODE_GET_RANGES, std::move(id));
+}
+
+// Wrapper for ADDNODE_SET_STREAM_DONE
+void messaging_service::register_addnode_set_stream_done(std::function<future<service::boot_status> (const rpc::client_info& cinfo)>&& f) {
+    register_handler(this, messaging_verb::ADDNODE_SET_STREAM_DONE, std::move(f));
+}
+void messaging_service::unregister_addnode_set_stream_done() {
+    _rpc->unregister_handler(messaging_verb::ADDNODE_SET_STREAM_DONE);
+}
+future<service::boot_status> 
+messaging_service::send_addnode_set_stream_done(msg_addr id) {
+    return send_message<service::boot_status>(this, messaging_verb::ADDNODE_SET_STREAM_DONE, std::move(id));
+}
+
+// Wrapper for ADDNODE_GET_CLUSTER_STATUS
+void messaging_service::register_addnode_get_cluster_status(std::function<future<service::boot_status> (const rpc::client_info& cinfo)>&& f) {
+    register_handler(this, messaging_verb::ADDNODE_GET_CLUSTER_STATUS, std::move(f));
+}
+void messaging_service::unregister_addnode_get_cluster_status() {
+    _rpc->unregister_handler(messaging_verb::ADDNODE_GET_CLUSTER_STATUS);
+}
+future<service::boot_status> 
+messaging_service::send_addnode_get_cluster_status(msg_addr id) {
+    return send_message<service::boot_status>(this, messaging_verb::ADDNODE_GET_CLUSTER_STATUS, std::move(id));
 }
 
 } // namespace net

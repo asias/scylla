@@ -44,6 +44,10 @@ namespace streaming {
     class prepare_message;
 }
 
+namespace service {
+    enum class boot_status : int8_t;
+}
+
 namespace gms {
     class gossip_digest_syn;
     class gossip_digest_ack;
@@ -112,7 +116,11 @@ enum class messaging_verb : int32_t {
     COUNTER_MUTATION = 23,
     MUTATION_FAILED = 24,
     STREAM_MUTATION_FRAGMENTS = 25,
-    LAST = 26,
+    ADDNODE_GET_TOKENS = 26,
+    ADDNODE_GET_RANGES = 27,
+    ADDNODE_SET_STREAM_DONE = 28,
+    ADDNODE_GET_CLUSTER_STATUS = 29,
+    LAST = 30,
 };
 
 } // namespace netw
@@ -266,6 +274,26 @@ public:
     void register_repair_checksum_range(std::function<future<partition_checksum> (sstring keyspace, sstring cf, dht::token_range range, rpc::optional<repair_checksum> hash_version)>&& func);
     void unregister_repair_checksum_range();
     future<partition_checksum> send_repair_checksum_range(msg_addr id, sstring keyspace, sstring cf, dht::token_range range, repair_checksum hash_version);
+
+    // Wrapper for ADDNODE_GET_TOKENS verb
+    void register_addnode_get_tokens(std::function<future<std::unordered_set<dht::token>> (const rpc::client_info& cinfo, uint32_t num_tokens)>&& func);
+    void unregister_addnode_get_tokens();
+    future<std::unordered_set<dht::token>> send_addnode_get_tokens(msg_addr id, uint32_t num_tokens);
+
+    // Wrapper for ADDNODE_GET_RANGES
+    void register_addnode_get_ranges(std::function<future<std::unordered_map<sstring, std::unordered_map<gms::inet_address, dht::token_range_vector>>> (const rpc::client_info& cinfo)>&& f);
+    void unregister_addnode_get_ranges();
+    future<std::unordered_map<sstring, std::unordered_map<gms::inet_address, dht::token_range_vector>>> send_addnode_get_ranges(msg_addr id);
+
+    // Wrapper for ADDNODE_SET_STREAM_DONE
+    void register_addnode_set_stream_done(std::function<future<service::boot_status> (const rpc::client_info& cinfo)>&& f);
+    void unregister_addnode_set_stream_done();
+    future<service::boot_status> send_addnode_set_stream_done(msg_addr id);
+
+    // Wrapper for ADDNODE_GET_CLUSTER_STATUS
+    void register_addnode_get_cluster_status(std::function<future<service::boot_status> (const rpc::client_info& cinfo)>&& f);
+    void unregister_addnode_get_cluster_status();
+    future<service::boot_status> send_addnode_get_cluster_status(msg_addr id);
 
     // Wrapper for GOSSIP_ECHO verb
     void register_gossip_echo(std::function<future<> ()>&& func);

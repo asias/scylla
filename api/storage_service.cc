@@ -407,6 +407,13 @@ void set_storage_service(http_context& ctx, routes& r) {
         });
     });
 
+    ss::addnode.set(r, [](std::unique_ptr<request> req) {
+        auto num_nodes = boost::lexical_cast<uint32_t>(req->get_query_param("num_nodes"));
+        return service::get_local_storage_service().addnode(num_nodes).then([] {
+            return make_ready_future<json::json_return_type>(json_void());
+        });
+    });
+
     ss::get_removal_status.set(r, [](std::unique_ptr<request> req) {
         return service::get_local_storage_service().get_removal_status().then([] (auto status) {
             return make_ready_future<json::json_return_type>(status);
