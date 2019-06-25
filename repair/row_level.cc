@@ -56,6 +56,8 @@ struct shard_config {
     sstring partitioner_name;
 };
 
+static bool inject_rpc_stream_error = false;
+
 distributed<db::system_distributed_keyspace>* _sys_dist_ks;
 distributed<db::view::view_update_generator>* _view_update_generator;
 
