@@ -822,6 +822,7 @@ void storage_service::bootstrap(std::unordered_set<token> tokens) {
     } else {
         // Dont set any state for the node which is bootstrapping the existing token...
         _token_metadata.update_normal_tokens(tokens, get_broadcast_address());
+        replicate_to_all_cores().get();
         auto replace_addr = db().local().get_replace_address();
         if (replace_addr) {
             slogger.debug("Removing replaced endpoint {} from system.peers", *replace_addr);
@@ -1570,6 +1571,10 @@ future<> storage_service::init_server(int delay, bind_messaging_port do_bind) {
                     _gossiper.add_saved_endpoint(ep);
                 }
             }
+            // Replicate the tokens early because once gossip runs other nodes
+            // might send reads/writes to this node. Replicate it early to make
+            // sure the tokens are valid on all the shards.
+            replicate_to_all_cores().get();
         }
 
         auto loaded_peer_features = db::system_keyspace::load_peer_features().get0();
@@ -1592,6 +1597,7 @@ future<> storage_service::init_server(int delay, bind_messaging_port do_bind) {
             auto tokens = db::system_keyspace::get_saved_tokens().get0();
             if (!tokens.empty()) {
                 _token_metadata.update_normal_tokens(tokens, get_broadcast_address());
+                replicate_to_all_cores().get();
                 // order is important here, the gossiper can fire in between adding these two states.  It's ok to send TOKENS without STATUS, but *not* vice versa.
                 _gossiper.add_local_application_state({
                     { gms::application_state::TOKENS, value_factory.tokens(tokens) },
