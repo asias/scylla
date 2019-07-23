@@ -64,6 +64,10 @@
 #include "db/config.hh"
 #include <boost/range/algorithm/set_algorithm.hpp>
 #include <boost/range/adaptors.hpp>
+#include "xx_hasher.hh"
+#include "gms/inet_address_serializer.hh"
+#include "bytes_ostream.hh"
+#include "serializer_impl.hh"
 
 namespace gms {
 
@@ -321,6 +325,37 @@ future<> gossiper::handle_echo_msg() {
     return make_ready_future<>();
 }
 
+uint64_t gossiper::get_gossip_status_hash() const {
+    auto nodes = boost::copy_range<std::set<gms::inet_address>>(endpoint_state_map | boost::adaptors::map_keys);
+    if (nodes.empty()) {
+        return 0;
+    }
+    xx_hasher h;
+    bytes_ostream out;
+    for (const auto& node : nodes) {
+        out.clear();
+        ser::serialize(out, get_gossip_status(node));
+        ser::serialize(out, node);
+        feed_hash(h, out.view());
+    }
+    return h.finalize_uint64();
+}
+
+static gossip_query_token_status_response get_gossip_query_token_status_response() {
+    auto& tm = service::get_local_storage_service().get_token_metadata();
+    auto& gossiper = gms::get_local_gossiper();
+    gossip_query_token_status_response resp{gossiper.endpoint_state_map.size(),
+        tm.get_normal_token_hash(),
+        tm.get_bootstrap_token_hash(),
+        tm.get_leaving_endpoints_hash(),
+        gossiper.get_gossip_status_hash()};
+    return resp;
+}
+
+future<gossip_query_token_status_response> gossiper::handle_query_msg(msg_addr from) {
+    return make_ready_future<gossip_query_token_status_response>(get_gossip_query_token_status_response());
+}
+
 future<> gossiper::handle_shutdown_msg(inet_address from) {
     set_last_processed_message_at();
     if (!is_enabled()) {
@@ -378,6 +413,12 @@ void gossiper::init_messaging_service_handler(bind_messaging_port do_bind) {
         });
         return messaging_service::no_wait();
     });
+    ms().register_gossip_query_token_status([] (const rpc::client_info& cinfo) {
+        auto from = netw::messaging_service::get_source(cinfo);
+        return smp::submit_to(0, [from] {
+            return gms::get_local_gossiper().handle_query_msg(from);
+        });
+    });
 
     // Start listening messaging_service after gossip message handlers are registered
     if (do_bind) {
@@ -392,6 +433,7 @@ void gossiper::uninit_messaging_service_handler() {
     ms.unregister_gossip_digest_syn();
     ms.unregister_gossip_digest_ack();
     ms.unregister_gossip_digest_ack2();
+    ms.unregister_gossip_query_token_status();
     _ms_registered = false;
 }
 
@@ -2028,9 +2070,16 @@ future<> gossiper::wait_for_gossip(std::chrono::milliseconds initial_delay, std:
     });
 }
 
+bool operator==(const gossip_query_token_status_response& x, gossip_query_token_status_response& y) {
+    return x.nr_known_nodes == y.nr_known_nodes
+            && x.normal_token_hash == y.normal_token_hash
+            && x.bootstrap_token_hash == y.bootstrap_token_hash
+            && x.leaving_nodes_hash == y.leaving_nodes_hash
+            && x.status_hash == y.status_hash;
+}
+
 future<> gossiper::wait_for_gossip_to_settle() {
-    static constexpr std::chrono::milliseconds GOSSIP_SETTLE_MIN_WAIT_MS{5000};
-    auto force_after = _cfg.skip_wait_for_gossip_to_settle();
+    logger.info("Waiting for gossip to settle with gossip query...");
     auto do_enable_features = [this] {
         return async([this] {
             if (!std::exchange(_gossip_settled, true)) {
@@ -2038,18 +2087,88 @@ future<> gossiper::wait_for_gossip_to_settle() {
             }
         });
     };
-    if (force_after == 0) {
+    return wait_for_gossip_with_query().then([do_enable_features] {
         return do_enable_features();
-    }
-    return wait_for_gossip(GOSSIP_SETTLE_MIN_WAIT_MS, force_after).then([this, do_enable_features] {
-        return do_enable_features();
+    }).handle_exception([this, do_enable_features] (std::exception_ptr ep) {
+        logger.info("Waiting for gossip to settle without gossip query...");
+        static constexpr std::chrono::milliseconds GOSSIP_SETTLE_MIN_WAIT_MS{5000};
+        auto force_after = _cfg.skip_wait_for_gossip_to_settle();
+        if (force_after == 0) {
+            return do_enable_features();
+        }
+        return wait_for_gossip(GOSSIP_SETTLE_MIN_WAIT_MS, force_after).then([this, do_enable_features] {
+            return do_enable_features();
+        });
     });
 }
 
 future<> gossiper::wait_for_range_setup() {
-    logger.info("Waiting for pending range setup...");
-    auto ring_delay = std::chrono::milliseconds(_cfg.ring_delay_ms());
-    return wait_for_gossip(ring_delay);
+    logger.info("Waiting for pending range setup with gossip query...");
+    return gossiper::wait_for_gossip_with_query().handle_exception([this] (std::exception_ptr ep) {
+        logger.info("Waiting for pending range setup without gossip query...");
+        auto ring_delay = service::get_local_storage_service().get_ring_delay();
+        return wait_for_gossip(ring_delay);
+    });
+}
+
+// Wait for gossip to settle with a rpc verb to query status of remote nodes
+// directly. If a node does not support the rpc verb or a node is down, we
+// will fall back to the old method, i.e., wait_for_gossip().
+future<> gossiper::wait_for_gossip_with_query() {
+    return seastar::async([this] {
+        while (true) {
+            auto nodes_to_check = boost::copy_range<std::set<gms::inet_address>>(endpoint_state_map | boost::adaptors::map_keys);
+            for (auto& seed : _seeds) {
+                nodes_to_check.insert(seed);
+            }
+            nodes_to_check.erase(get_broadcast_address());
+            size_t nodes_down = 0;
+            std::unordered_map<gms::inet_address, gossip_query_token_status_response> gossip_queries;
+            parallel_for_each(nodes_to_check, [this, &nodes_down, &gossip_queries] (const auto& node) {
+                return ms().send_gossip_query_token_status(get_msg_addr(node)).then([node, &nodes_down, &gossip_queries] (gossip_query_token_status_response result) {
+                    gossip_queries[node] = std::move(result);
+                }).handle_exception([node, &nodes_down] (std::exception_ptr ep) {
+                    try {
+                        std::rethrow_exception(ep);
+                    } catch (seastar::rpc::unknown_verb_error& e) {
+                        logger.info("Node {} does not support gossip query: {}", node, e);
+                        throw e;
+                    } catch (seastar::rpc::closed_error& e) {
+                        nodes_down++;
+                    } catch (...) {
+                        logger.info("Failed to send gossip query to {}", std::current_exception());
+                        throw;
+                    }
+                });
+            }).get();
+            auto local = get_gossip_query_token_status_response();
+            size_t matched = 0;
+            logger.debug("Node {} nr_known_nodes={}, normal_token_hash={}, bootstrap_token_hash={}, leaving_nodes_hash={}, status_hash={}",
+                    get_broadcast_address(), local.nr_known_nodes, local.normal_token_hash, local.bootstrap_token_hash, local.leaving_nodes_hash, local.status_hash);
+            for (auto& query : gossip_queries) {
+                gossip_query_token_status_response& remote = query.second;
+                logger.debug("Node {} nr_known_nodes={}, normal_token_hash={}, bootstrap_token_hash={}, leaving_nodes_hash={}, status_hash={}",
+                        query.first, remote.nr_known_nodes, remote.normal_token_hash, remote.bootstrap_token_hash, remote.leaving_nodes_hash, remote.status_hash);
+                if (remote == local) {
+                    matched++;
+                }
+            }
+            size_t needed = nodes_to_check.size();
+            if (nodes_down) {
+                logger.info("Wait for gossip matched={}, needed={}, nodes_down={}, nodes_to_check={}, gave up due to nodes down",
+                        matched, needed, nodes_down, nodes_to_check);
+                throw std::runtime_error("Gave up wait for gossip with query becasue nodes are down");
+            }
+            if (matched == needed) {
+                logger.info("Wait for gossip matched={}, needed={}, nodes_down={}, nodes_to_check={}, done",
+                        matched, needed, nodes_down, nodes_to_check);
+                return;
+            }
+            logger.debug("Wait for gossip matched={}, needed={}, nodes_down={}, nodes_to_check={}, try again",
+                    matched, needed, nodes_down, nodes_to_check);
+            sleep_abortable(std::chrono::milliseconds(200)).get();
+        }
+    });
 }
 
 bool gossiper::is_safe_for_bootstrap(inet_address endpoint) {

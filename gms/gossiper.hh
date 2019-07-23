@@ -76,6 +76,19 @@ class i_endpoint_state_change_subscriber;
 
 class feature_service;
 
+struct gossip_query_token_status_response {
+    // Number of nodes this node knows about
+    uint64_t nr_known_nodes;
+    // The hash of the tokens for nodes in NORMAL status
+    uint64_t normal_token_hash;
+    // The hash of the tokens for nodes in BOOTSTRAPPING status
+    uint64_t bootstrap_token_hash;
+    // The hash of the nodes that are leaving the cluster
+    uint64_t leaving_nodes_hash;
+    // The hash of the status of nodes
+    uint64_t status_hash;
+};
+
 struct bind_messaging_port_tag {};
 using bind_messaging_port = bool_class<bind_messaging_port_tag>;
 
@@ -108,6 +121,7 @@ private:
     future<> handle_ack_msg(msg_addr from, gossip_digest_ack ack_msg);
     future<> handle_ack2_msg(gossip_digest_ack2 msg);
     future<> handle_echo_msg();
+    future<gms::gossip_query_token_status_response> handle_query_msg(msg_addr from);
     future<> handle_shutdown_msg(inet_address from);
     static constexpr uint32_t _default_cpuid = 0;
     msg_addr get_msg_addr(inet_address to);
@@ -562,11 +576,13 @@ public:
 public:
     sstring get_gossip_status(const endpoint_state& ep_state) const;
     sstring get_gossip_status(const inet_address& endpoint) const;
+    uint64_t get_gossip_status_hash() const;
 public:
     future<> wait_for_gossip_to_settle();
     future<> wait_for_range_setup();
 private:
     future<> wait_for_gossip(std::chrono::milliseconds, std::optional<int32_t> = {});
+    future<> wait_for_gossip_with_query();
 
     uint64_t _nr_run = 0;
     uint64_t _msg_processing = 0;
