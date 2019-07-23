@@ -74,4 +74,12 @@ class gossip_digest_ack2 {
     std::map<gms::inet_address, gms::endpoint_state> get_endpoint_state_map();
 };
 
+struct gossip_query_token_status_response {
+    uint64_t nr_known_nodes;
+    uint64_t normal_token_hash;
+    uint64_t bootstrap_token_hash;
+    uint64_t leaving_nodes_hash;
+    uint64_t status_hash;
+};
+
 }
