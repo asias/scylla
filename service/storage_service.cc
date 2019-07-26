@@ -1001,21 +1001,33 @@ void storage_service::handle_state_normal(inet_address endpoint) {
             (host_id == _gossiper.get_host_id(db().local().get_replace_address().value()))) {
             slogger.warn("Not updating token metadata for {} because I am replacing it", endpoint);
         } else {
+            // Existing node and the node becomes NORMAL status are not the same node
             if (existing && *existing != endpoint) {
+                // Existing node is myself
                 if (*existing == get_broadcast_address()) {
                     slogger.warn("Not updating host ID {} for {} because it's mine", host_id, endpoint);
+                    if (_gossiper.compare_endpoint_startup(endpoint, *existing) > 0) {
+                        slogger.error("Node {} is the new ower of the host ID ={}. I used to be the owner of the host ID. Stop myself to prevent old node to join the cluster!",
+                                endpoint, host_id, get_broadcast_address(), host_id);
+                        stop_transport().get();
+                        abort();
+                    }
                     _token_metadata.remove_endpoint(endpoint);
                     endpoints_to_remove.insert(endpoint);
+                // Existing node is the other node with older generation
                 } else if (_gossiper.compare_endpoint_startup(endpoint, *existing) > 0) {
                     slogger.warn("Host ID collision for {} between {} and {}; {} is the new owner", host_id, *existing, endpoint, endpoint);
                     _token_metadata.remove_endpoint(*existing);
                     endpoints_to_remove.insert(*existing);
                     _token_metadata.update_host_id(host_id, endpoint);
+                // Existing node is the other node with newer generation
                 } else {
                     slogger.warn("Host ID collision for {} between {} and {}; ignored {}", host_id, *existing, endpoint, endpoint);
                     _token_metadata.remove_endpoint(endpoint);
                     endpoints_to_remove.insert(endpoint);
                 }
+            // No existing node or existing node and the node becomes NORMAL
+            // status are the same node.
             } else {
                 _token_metadata.update_host_id(host_id, endpoint);
             }
