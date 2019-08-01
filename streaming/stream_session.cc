@@ -161,7 +161,7 @@ void stream_session::init_messaging_service_handler() {
             });
         });
     });
-    ms().register_stream_mutation_fragments([] (const rpc::client_info& cinfo, UUID plan_id, UUID schema_id, UUID cf_id, uint64_t estimated_partitions, rpc::optional<stream_reason> reason_opt, rpc::source<frozen_mutation_fragment> source) {
+    ms().register_stream_mutation_fragments([] (const rpc::client_info& cinfo, UUID plan_id, UUID schema_id, UUID cf_id, uint64_t estimated_partitions, rpc::optional<stream_reason> reason_opt, rpc::source<frozen_mutation_fragment, rpc::optional<bool>> source) {
         auto from = netw::messaging_service::get_source(cinfo);
         auto reason = reason_opt ? *reason_opt: stream_reason::unspecified;
         sslog.trace("Got stream_mutation_fragments from {} reason {}", from, int(reason));
@@ -174,9 +174,13 @@ void stream_session::init_messaging_service_handler() {
                 return service::get_schema_for_write(schema_id, from).then([from, estimated_partitions, plan_id, schema_id, &cf, source, reason] (schema_ptr s) mutable {
                     auto sink = ms().make_sink_for_stream_mutation_fragments(source);
                     auto get_next_mutation_fragment = [source, plan_id, from, s] () mutable {
-                        return source().then([plan_id, from, s] (std::optional<std::tuple<frozen_mutation_fragment>> fmf_opt) mutable {
-                            if (fmf_opt) {
-                                frozen_mutation_fragment& fmf = std::get<0>(fmf_opt.value());
+                        return source().then([plan_id, from, s] (std::optional<std::tuple<frozen_mutation_fragment, rpc::optional<bool>>> opt) mutable {
+                            if (opt) {
+                                auto error = std::get<1>(*opt);
+                                if (error && *error) {
+                                    return make_exception_future<mutation_fragment_opt>(std::runtime_error("Sender failed"));
+                                }
+                                frozen_mutation_fragment& fmf = std::get<0>(*opt);
                                 auto sz = fmf.representation().size();
                                 auto mf = fmf.unfreeze(*s);
                                 streaming::get_local_stream_manager().update_progress(plan_id, from.addr, progress_info::direction::IN, sz);
