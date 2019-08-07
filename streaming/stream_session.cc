@@ -231,12 +231,13 @@ void stream_session::init_messaging_service_handler() {
                         bool got_end_of_stream = false;
                     };
                     auto cmd_status = make_lw_shared<stream_mutation_fragments_cmd_status>();
-                    auto get_next_mutation_fragment = [source, plan_id, from, s, cmd_status] () mutable {
-                            return make_ready_future<mutation_fragment_opt>();
-                    };
-#if 0
+                    // auto get_next_mutation_fragment = [source, plan_id, from, s, cmd_status] () mutable {
+                    //         return make_ready_future<mutation_fragment_opt>();
+                    // };
                     auto get_next_mutation_fragment = [source, plan_id, from, s, cmd_status] () mutable {
                         return source().then([plan_id, from, s, cmd_status] (std::optional<std::tuple<frozen_mutation_fragment, rpc::optional<stream_mutation_fragments_cmd>>> opt) mutable {
+                            return make_ready_future<mutation_fragment_opt>();
+#if 0
                             if (opt) {
                                 auto cmd = std::get<1>(*opt);
                                 if (cmd) {
@@ -267,9 +268,9 @@ void stream_session::init_messaging_service_handler() {
                                 }
                                 return make_ready_future<mutation_fragment_opt>();
                             }
+#endif
                         });
                     };
-#endif
                     distribute_reader_and_consume_on_shards(s, dht::global_partitioner(),
                         make_flat_mutation_reader<generating_reader>(s, std::move(get_next_mutation_fragment)),
                         [cf_id, plan_id, estimated_partitions, reason] (flat_mutation_reader reader) {
