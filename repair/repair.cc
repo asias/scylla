@@ -236,16 +236,26 @@ tracker::~tracker() {
 
 void tracker::start(int id) {
     _gate.enter();
-    _status[id] = repair_status::RUNNING;
+    try {
+        _status[id] = repair_status::RUNNING;
+    } catch (...) {
+        _gate.leave();
+        throw;
+    }
 }
 
 void tracker::done(int id, bool succeeded) {
-    if (succeeded) {
-        _status.erase(id);
-    } else {
-        _status[id] = repair_status::FAILED;
+    try {
+        if (succeeded) {
+            _status.erase(id);
+        } else {
+            _status[id] = repair_status::FAILED;
+        }
+        _gate.leave();
+    } catch (...) {
+        _gate.leave();
+        throw;
     }
-    _gate.leave();
 }
 repair_status tracker::get(int id) {
     if (id >= _next_repair_command) {
