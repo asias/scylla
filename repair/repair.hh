@@ -251,6 +251,7 @@ public:
     void abort_all_repairs();
     semaphore& range_parallelism_semaphore();
     static size_t max_repair_memory_per_range() { return _max_repair_memory_per_range; }
+    seastar::gate& gate() { return _gate; };
 };
 
 future<uint64_t> estimate_partitions(seastar::sharded<database>& db, const sstring& keyspace,
