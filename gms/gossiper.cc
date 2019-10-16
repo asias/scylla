@@ -224,14 +224,58 @@ future<> gossiper::handle_syn_msg(msg_addr from, gossip_digest_syn syn_msg) {
         return make_ready_future<>();
     }
 
-    auto g_digest_list = syn_msg.get_gossip_digests();
-    do_sort(g_digest_list);
-    utils::chunked_vector<gossip_digest> delta_gossip_digest_list;
-    std::map<inet_address, endpoint_state> delta_ep_state_map;
-    this->examine_gossiper(g_digest_list, delta_gossip_digest_list, delta_ep_state_map);
-    gms::gossip_digest_ack ack_msg(std::move(delta_gossip_digest_list), std::move(delta_ep_state_map));
-    logger.trace("handle_syn_msg(): response={}", ack_msg);
-    return this->ms().send_gossip_digest_ack(from, std::move(ack_msg));
+    syn_msg_pending& p = _syn_handlers[from.addr];
+    if (p.pending) {
+        // The latest syn message from peer has the latest infomation, so
+        // it is safe to drop the previous syn message and keep the latest
+        // one only.
+        logger.debug("Queue gossip syn msg for node {}, syn_msg={}", from, syn_msg);
+        p.syn_msg = std::move(syn_msg);
+        return make_ready_future<>();
+    } else {
+        // Process the syn message immediately
+        logger.debug("Process gossip syn msg for node {}, syn_msg={}", from, syn_msg);
+        return do_send_ack_msg(from, std::move(syn_msg));
+    }
+}
+
+future<> gossiper::do_send_ack_msg(msg_addr from, gossip_digest_syn syn_msg) {
+    syn_msg_pending& p = _syn_handlers[from.addr];
+    logger.debug("Calling do_send_ack_msg for node {}, syn_msg={}", from, syn_msg);
+    try {
+        p.pending = true;
+        auto g_digest_list = syn_msg.get_gossip_digests();
+        do_sort(g_digest_list);
+        utils::chunked_vector<gossip_digest> delta_gossip_digest_list;
+        std::map<inet_address, endpoint_state> delta_ep_state_map;
+        this->examine_gossiper(g_digest_list, delta_gossip_digest_list, delta_ep_state_map);
+        gms::gossip_digest_ack ack_msg(std::move(delta_gossip_digest_list), std::move(delta_ep_state_map));
+        logger.trace("handle_syn_msg(): response={}", ack_msg);
+        return this->ms().send_gossip_digest_ack(from, std::move(ack_msg)).finally([this, from] {
+            syn_msg_pending& p = _syn_handlers[from.addr];
+            if (p.syn_msg) {
+                // Process pending gossip syn msg and send ack msg back
+                logger.debug("Process queued gossip syn msg for node {}, syn_msg={}, pending={}",
+                        from, p.syn_msg, p.pending);
+                auto syn_msg = std::move(p.syn_msg.value());
+                p.syn_msg = {};
+                return do_send_ack_msg(from, std::move(syn_msg));
+            } else {
+                // No more pending syn msg to process
+                p.pending = false;
+                logger.debug("No more queued gossip syn msg for node {}, syn_msg={}, pending={}",
+                        from, p.syn_msg, p.pending);
+                return make_ready_future<>();
+            }
+        });
+    } catch (...) {
+        p.pending = false;
+        p.syn_msg = {};
+        logger.warn("Failed to process gossip syn msg from node {} in do_send_ack_msg: {}",
+                from, std::current_exception());
+        throw;
+    }
+    return make_ready_future<>();
 }
 
 class gossiper::msg_proc_guard {
