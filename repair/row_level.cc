@@ -339,7 +339,7 @@ private:
 public:
     future<mutation_fragment_opt>
     read_mutation_fragment() {
-        return _reader(db::no_timeout);
+        return _reader(db::timeout_clock::now() + std::chrono::seconds(60 * 5));
     }
 
     lw_shared_ptr<const decorated_key_with_hash>& get_current_dk() {
