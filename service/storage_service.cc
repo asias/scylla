@@ -2766,35 +2766,41 @@ void storage_service::unbootstrap() {
 }
 
 future<> storage_service::restore_replica_count(inet_address endpoint, inet_address notify_endpoint) {
-    auto streamer = make_lw_shared<dht::range_streamer>(_db, get_token_metadata(), _abort_source, get_broadcast_address(), "Restore_replica_count", streaming::stream_reason::removenode);
-    auto my_address = get_broadcast_address();
-    auto non_system_keyspaces = _db.local().get_non_system_keyspaces();
-    for (const auto& keyspace_name : non_system_keyspaces) {
-        std::unordered_multimap<dht::token_range, inet_address> changed_ranges = get_changed_ranges_for_leaving(keyspace_name, endpoint);
-        dht::token_range_vector my_new_ranges;
-        for (auto& x : changed_ranges) {
-            if (x.second == my_address) {
-                my_new_ranges.emplace_back(x.first);
+    if (is_repair_based_node_ops_enabled()) {
+        return removenode_with_repair(_db, _token_metadata, endpoint).finally([this, notify_endpoint] () {
+            return send_replication_notification(notify_endpoint);
+        });
+    } else {
+        auto streamer = make_lw_shared<dht::range_streamer>(_db, get_token_metadata(), _abort_source, get_broadcast_address(), "Restore_replica_count", streaming::stream_reason::removenode);
+        auto my_address = get_broadcast_address();
+        auto non_system_keyspaces = _db.local().get_non_system_keyspaces();
+        for (const auto& keyspace_name : non_system_keyspaces) {
+            std::unordered_multimap<dht::token_range, inet_address> changed_ranges = get_changed_ranges_for_leaving(keyspace_name, endpoint);
+            dht::token_range_vector my_new_ranges;
+            for (auto& x : changed_ranges) {
+                if (x.second == my_address) {
+                    my_new_ranges.emplace_back(x.first);
+                }
             }
+            std::unordered_multimap<inet_address, dht::token_range> source_ranges = get_new_source_ranges(keyspace_name, my_new_ranges);
+            std::unordered_map<inet_address, dht::token_range_vector> ranges_per_endpoint;
+            for (auto& x : source_ranges) {
+                ranges_per_endpoint[x.first].emplace_back(x.second);
+            }
+            streamer->add_rx_ranges(keyspace_name, std::move(ranges_per_endpoint));
         }
-        std::unordered_multimap<inet_address, dht::token_range> source_ranges = get_new_source_ranges(keyspace_name, my_new_ranges);
-        std::unordered_map<inet_address, dht::token_range_vector> ranges_per_endpoint;
-        for (auto& x : source_ranges) {
-            ranges_per_endpoint[x.first].emplace_back(x.second);
-        }
-        streamer->add_rx_ranges(keyspace_name, std::move(ranges_per_endpoint));
+        return streamer->stream_async().then_wrapped([this, streamer, notify_endpoint] (auto&& f) {
+            try {
+                f.get();
+                return this->send_replication_notification(notify_endpoint);
+            } catch (...) {
+                slogger.warn("Streaming to restore replica count failed: {}", std::current_exception());
+                // We still want to send the notification
+                return this->send_replication_notification(notify_endpoint);
+            }
+            return make_ready_future<>();
+        });
     }
-    return streamer->stream_async().then_wrapped([this, streamer, notify_endpoint] (auto&& f) {
-        try {
-            f.get();
-            return this->send_replication_notification(notify_endpoint);
-        } catch (...) {
-            slogger.warn("Streaming to restore replica count failed: {}", std::current_exception());
-            // We still want to send the notification
-            return this->send_replication_notification(notify_endpoint);
-        }
-        return make_ready_future<>();
-    });
 }
 
 // Runs inside seastar::async context
