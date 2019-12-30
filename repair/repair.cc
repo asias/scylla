@@ -1307,6 +1307,7 @@ static future<> do_repair_ranges(lw_shared_ptr<repair_info> ri) {
 // is assumed to be a indivisible in the sense that all the tokens in has the
 // same nodes as replicas.
 static future<> repair_ranges(lw_shared_ptr<repair_info> ri) {
+  return do_with(std::move(ri), [] (lw_shared_ptr<repair_info>& ri) {
     repair_tracker().add_repair_info(ri->id, ri);
     return do_repair_ranges(ri).then([ri] {
         ri->check_failed_ranges();
@@ -1317,6 +1318,7 @@ static future<> repair_ranges(lw_shared_ptr<repair_info> ri) {
         repair_tracker().remove_repair_info(ri->id);
         return make_exception_future<>(std::move(eptr));
     });
+  });
 }
 
 // repair_start() can run on any cpu; It runs on cpu0 the function
