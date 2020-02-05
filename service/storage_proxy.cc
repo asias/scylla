@@ -1750,6 +1750,31 @@ storage_proxy::create_write_response_handler_helper(schema_ptr s, const dht::tok
     std::vector<gms::inet_address> natural_endpoints = rs.get_natural_endpoints(token);
     std::vector<gms::inet_address> pending_endpoints = _token_metadata.pending_endpoints_for(token, keyspace_name);
 
+    if (get_local_storage_service().get_token_metadata().is_any_node_being_replaced() &&
+        rs.get_type() != locator::replication_strategy_type::local) {
+        // When a new node is started to replace an existing dead node, we want
+        // to make the replacing node take writes but do not count it for
+        // consistency level, because the replacing node can die and go away.
+        // To do this, we filter out the existing node being replaced from
+        // natural_endpoints and make the replacing node in the pending_endpoints.
+        //
+        // However, we can not apply the filter for LocalStrategy because
+        // LocalStrategy always has RF = 1 and returns the node itself as the
+        // natural_endpoints. If the replacing node had the same ip address as
+        // the node being replaced, we can not filter out the local node,
+        // otherwise all the query to keyspace with LocalStrategy will fail,
+        // e.g., the system keyspace.
+        auto original_natural_endpoints = natural_endpoints;
+        auto it = boost::range::remove_if(natural_endpoints, [] (gms::inet_address& p) {
+            return get_local_storage_service().get_token_metadata().is_being_replaced(p);
+        });
+        natural_endpoints.erase(it, natural_endpoints.end());
+        if (original_natural_endpoints.size() != natural_endpoints.size()) {
+            slogger.trace("creating write handler for token: {}, ks={}, original_natrual={}, natural={}, pending={}",
+                    token, keyspace_name, original_natural_endpoints, natural_endpoints, pending_endpoints);
+        }
+    }
+
     slogger.trace("creating write handler for token: {} natural: {} pending: {}", token, natural_endpoints, pending_endpoints);
     tracing::trace(tr_state, "Creating write handler for token: {} natural: {} pending: {}", token, natural_endpoints ,pending_endpoints);
 
@@ -2049,6 +2074,32 @@ storage_proxy::get_paxos_participants(const sstring& ks_name, const dht::token &
     locator::abstract_replication_strategy& rs = ks.get_replication_strategy();
     std::vector<gms::inet_address> natural_endpoints = rs.get_natural_endpoints(token);
     std::vector<gms::inet_address> pending_endpoints = _token_metadata.pending_endpoints_for(token, ks_name);
+
+    // FIXME: Does this work with paxos at all
+    if (get_local_storage_service().get_token_metadata().is_any_node_being_replaced() &&
+        rs.get_type() != locator::replication_strategy_type::local) {
+        // When a new node is started to replace an existing dead node, we want
+        // to make the replacing node take writes but do not count it for
+        // consistency level, because the replacing node can die and go away.
+        // To do this, we filter out the existing node being replaced from
+        // natural_endpoints and make the replacing node in the pending_endpoints.
+        //
+        // However, we can not apply the filter for LocalStrategy because
+        // LocalStrategy always has RF = 1 and returns the node itself as the
+        // natural_endpoints. If the replacing node had the same ip address as
+        // the node being replaced, we can not filter out the local node,
+        // otherwise all the query to keyspace with LocalStrategy will fail,
+        // e.g., the system keyspace.
+        auto original_natural_endpoints = natural_endpoints;
+        auto it = boost::range::remove_if(natural_endpoints, [] (gms::inet_address& p) {
+            return get_local_storage_service().get_token_metadata().is_being_replaced(p);
+        });
+        natural_endpoints.erase(it, natural_endpoints.end());
+        if (original_natural_endpoints.size() != natural_endpoints.size()) {
+            slogger.trace("creating write handler for token: {}, ks={}, original_natrual={}, natural={}, pending={}",
+                    token, ks_name, original_natural_endpoints, natural_endpoints, pending_endpoints);
+        }
+    }
 
     if (cl_for_paxos == db::consistency_level::LOCAL_SERIAL) {
         auto itend = boost::range::remove_if(natural_endpoints, std::not1(std::cref(db::is_local)));
