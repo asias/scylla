@@ -157,7 +157,7 @@ future<> service::create_keyspace_if_missing(::service::migration_manager& mm) c
     auto& db = _qp.db();
 
     if (!db.has_keyspace(meta::AUTH_KS)) {
-        std::map<sstring, sstring> opts{{"replication_factor", "1"}};
+        std::map<sstring, sstring> opts{{"replication_factor", "3"}};
 
         auto ksm = keyspace_metadata::new_keyspace(
                 meta::AUTH_KS,
