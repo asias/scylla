@@ -176,7 +176,7 @@ future<> send_mutations(lw_shared_ptr<send_info> si) {
 }
 
 future<> send_mutation_fragments(lw_shared_ptr<send_info> si) {
- return si->reader.peek(db::no_timeout).then([si] (mutation_fragment* mfp) {
+ return si->reader.peek(db::timeout_clock::now() + std::chrono::minutes(10)).then([si] (mutation_fragment* mfp) {
   if (!mfp) {
     // The reader contains no data
     sslog.info("[Stream #{}] Skip sending ks={}, cf={}, reader contains no data, with new rpc streaming",
@@ -210,7 +210,7 @@ future<> send_mutation_fragments(lw_shared_ptr<send_info> si) {
         auto sink_op = [sink, si, got_error_from_peer] () mutable -> future<> {
             return do_with(std::move(sink), [si, got_error_from_peer] (rpc::sink<frozen_mutation_fragment, stream_mutation_fragments_cmd>& sink) {
                 return repeat([&sink, si, got_error_from_peer] () mutable {
-                    return si->reader(db::no_timeout).then([&sink, si, s = si->reader.schema(), got_error_from_peer] (mutation_fragment_opt mf) mutable {
+                    return si->reader(db::timeout_clock::now() + std::chrono::minutes(10)).then([&sink, si, s = si->reader.schema(), got_error_from_peer] (mutation_fragment_opt mf) mutable {
                         if (mf && !(*got_error_from_peer)) {
                             frozen_mutation_fragment fmf = freeze(*s, *mf);
                             auto size = fmf.representation().size();
