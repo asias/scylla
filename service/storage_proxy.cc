@@ -1837,6 +1837,27 @@ storage_proxy::mutate_streaming_mutation(const schema_ptr& s, utils::UUID plan_i
     });
 }
 
+static std::vector<gms::inet_address> get_natural_endpoints_without_node_being_replaced(keyspace& ks, const dht::token& token) {
+    auto& rs = ks.get_replication_strategy();
+    std::vector<gms::inet_address> natural_endpoints = rs.get_natural_endpoints(token);
+    if (get_local_storage_service().get_token_metadata().is_any_node_being_replaced() &&
+        rs.get_type() != locator::replication_strategy_type::local) {
+        // When a new node is started to replace an existing dead node, we want
+        // to make the replacing node take writes but do not count it for
+        // consistency level, because the replacing node can die and go away.
+        // To do this, we filter out the existing node being replaced from
+        // natural_endpoints and make the replacing node in the pending_endpoints.
+        //
+        // However, we can not apply the filter for LocalStrategy because
+        // LocalStrategy always returns the node itself as the natural_endpoints
+        // and the node will not appear in the pending_endpoints.
+        auto it = boost::range::remove_if(natural_endpoints, [] (gms::inet_address& p) {
+            return get_local_storage_service().get_token_metadata().is_being_replaced(p);
+        });
+        natural_endpoints.erase(it, natural_endpoints.end());
+    }
+    return natural_endpoints;
+}
 
 storage_proxy::response_id_type
 storage_proxy::create_write_response_handler_helper(schema_ptr s, const dht::token& token, std::unique_ptr<mutation_holder> mh,
