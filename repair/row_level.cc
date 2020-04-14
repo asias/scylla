@@ -2434,6 +2434,7 @@ public:
             };
             auto s = _cf.schema();
             auto schema_version = s->version();
+            bool table_dropped = false;
 
             repair_meta master(_ri.db,
                     _cf,
@@ -2486,10 +2487,13 @@ public:
                     send_missing_rows_to_follower_nodes(master);
                 }
             } catch (std::exception& e) {
+                std::string err(e.what());
+                if (err.find("Can't find a column family") == 0) {
+                    table_dropped = true;
+                }
                 rlogger.info("Got error in row level repair: {}", e);
                 // In case the repair process fail, we need to call repair_row_level_stop to clean up repair followers
                 _failed = true;
-                _ri.nr_failed_ranges++;
             }
 
             parallel_for_each(nodes_to_stop, [&] (const gms::inet_address& node) {
@@ -2498,7 +2502,11 @@ public:
 
             _ri.update_statistics(master.stats());
             if (_failed) {
-                throw std::runtime_error(format("Failed to repair for keyspace={}, cf={}, range={}", _ri.keyspace, _cf_name, _range));
+                if (table_dropped) {
+                    throw no_such_column_family(_ri.keyspace,  _cf_name);
+                } else {
+                    throw std::runtime_error(format("Failed to repair for keyspace={}, cf={}, range={}", _ri.keyspace, _cf_name, _range));
+                }
             }
             rlogger.debug("<<< Finished Row Level Repair (Master): local={}, peers={}, repair_meta_id={}, keyspace={}, cf={}, range={}, tx_hashes_nr={}, rx_hashes_nr={}, tx_row_nr={}, rx_row_nr={}, row_from_disk_bytes={}, row_from_disk_nr={}",
                     master.myip(), _all_live_peer_nodes, master.repair_meta_id(), _ri.keyspace, _cf_name, _range, master.stats().tx_hashes_nr, master.stats().rx_hashes_nr, master.stats().tx_row_nr, master.stats().rx_row_nr, master.stats().row_from_disk_bytes, master.stats().row_from_disk_nr);

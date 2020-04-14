@@ -204,6 +204,8 @@ public:
     repair_stats _stats;
     bool _row_level_repair;
     uint64_t _sub_ranges_nr = 0;
+    std::unordered_set<sstring> dropped_tables;
+    bool ignore_dropped_tables = false;
 public:
     repair_info(seastar::sharded<database>& db_,
             const sstring& keyspace_,
