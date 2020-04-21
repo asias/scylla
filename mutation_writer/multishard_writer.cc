@@ -57,6 +57,7 @@ private:
     uint64_t _consumed_partitions = 0;
     flat_mutation_reader _producer;
     std::function<future<> (flat_mutation_reader)> _consumer;
+    std::function<void (std::exception_ptr ep)> _on_fail;
 private:
     unsigned shard_for_mf(const mutation_fragment& mf) {
         return _s->get_sharder().shard_of(mf.as_partition_start().key().token());
@@ -71,7 +72,8 @@ public:
     multishard_writer(
         schema_ptr s,
         flat_mutation_reader producer,
-        std::function<future<> (flat_mutation_reader)> consumer);
+        std::function<future<> (flat_mutation_reader)> consumer,
+        std::function<void (std::exception_ptr ep)> on_fail);
     future<uint64_t> operator()();
 };
 
@@ -95,11 +97,13 @@ future<> shard_writer::consume() {
 multishard_writer::multishard_writer(
     schema_ptr s,
     flat_mutation_reader producer,
-    std::function<future<> (flat_mutation_reader)> consumer)
+    std::function<future<> (flat_mutation_reader)> consumer,
+    std::function<void (std::exception_ptr ep)> on_fail)
     : _s(std::move(s))
     , _queue_reader_handles(_s->get_sharder().shard_count())
     , _producer(std::move(producer))
-    , _consumer(std::move(consumer)) {
+    , _consumer(std::move(consumer))
+    , _on_fail(std::move(on_fail)) {
     _shard_writers.resize(_s->get_sharder().shard_count());
 }
 
@@ -188,14 +192,18 @@ future<uint64_t> multishard_writer::operator()() {
         return wait_pending_consumers();
     }).then([this] {
         return _consumed_partitions;
+    }).handle_exception([this] (std::exception_ptr ep) {
+        _on_fail(ep);
+        return make_exception_future<uint64_t>(std::move(ep));
     });
 }
 
 future<uint64_t> distribute_reader_and_consume_on_shards(schema_ptr s,
     flat_mutation_reader producer,
     std::function<future<> (flat_mutation_reader)> consumer,
+    std::function<void (std::exception_ptr ep)> on_fail,
     utils::phased_barrier::operation&& op) {
-    return do_with(multishard_writer(std::move(s), std::move(producer), std::move(consumer)), std::move(op), [] (multishard_writer& writer, utils::phased_barrier::operation&) {
+    return do_with(multishard_writer(std::move(s), std::move(producer), std::move(consumer), std::move(on_fail)), std::move(op), [] (multishard_writer& writer, utils::phased_barrier::operation&) {
         return writer();
     });
 }

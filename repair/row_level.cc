@@ -490,6 +490,10 @@ public:
         auto get_next_mutation_fragment = [this, node_idx] () mutable {
             return _mq[node_idx]->pop_eventually();
         };
+        auto on_fail = [this, node_idx] (std::exception_ptr ep) mutable {
+            rlogger.warn("repair_writer::create_writer: multishard_writer failed: {}", ep);
+            _mq[node_idx]->abort(std::move(ep));
+        };
         table& t = db.local().find_column_family(_schema->id());
         _writer_done[node_idx] = mutation_writer::distribute_reader_and_consume_on_shards(_schema,
                 make_generating_reader(_schema, std::move(get_next_mutation_fragment)),
@@ -521,6 +525,7 @@ public:
                 return consumer(std::move(reader));
             });
         },
+        std::move(on_fail),
         t.stream_in_progress());
     }
 
@@ -563,6 +568,14 @@ public:
                 });
             }
             return make_ready_future<>();
+        }).handle_exception([this] (std::exception_ptr ep) {
+            for (unsigned node_idx = 0; node_idx < _nr_peer_nodes; node_idx++) {
+                if (_writer_done[node_idx] && _writer_done[node_idx]->failed()) {
+                    rlogger.warn("repair_writer::wait_for_writer_done: writer failed: {}", _writer_done[node_idx]->get_exception());
+                }
+            }
+            rlogger.warn("repair_writer::wait_for_writer_done failed: {}", ep);
+            return make_exception_future<>(std::move(ep));
         });
     }
 };

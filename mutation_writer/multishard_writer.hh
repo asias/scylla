@@ -34,6 +34,7 @@ namespace mutation_writer {
 future<uint64_t> distribute_reader_and_consume_on_shards(schema_ptr s,
     flat_mutation_reader producer,
     std::function<future<> (flat_mutation_reader)> consumer,
+    std::function<void (std::exception_ptr ep)> on_fail,
     utils::phased_barrier::operation&& op = {});
 
 } // namespace mutation_writer

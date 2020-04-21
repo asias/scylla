@@ -246,6 +246,7 @@ void stream_session::init_messaging_service_handler() {
                                 return consumer(std::move(reader));
                             });
                         },
+                        [plan_id] (std::exception_ptr ep) { sslog.error("[Stream #{}] multishard_writer failed: {}", plan_id, ep); },
                         cf.stream_in_progress()
                     ).then_wrapped([s, plan_id, from, sink, estimated_partitions] (future<uint64_t> f) mutable {
                         int32_t status = 0;
