@@ -521,7 +521,11 @@ public:
                 return consumer(std::move(reader));
             });
         },
-        t.stream_in_progress());
+        t.stream_in_progress()).handle_exception([this, node_idx] (std::exception_ptr ep) {
+            rlogger.warn("repair_writer::create_writer: multishard_writer failed: {}", ep);
+            _mq[node_idx]->abort(ep);
+            return make_exception_future<uint64_t>(std::move(ep));
+        });
     }
 
     future<> write_partition_end(unsigned node_idx) {
@@ -563,6 +567,14 @@ public:
                 });
             }
             return make_ready_future<>();
+        }).handle_exception([this] (std::exception_ptr ep) {
+            for (auto& w : _writer_done) {
+                if (w && w->failed()) {
+                    w->ignore_ready_future();
+                }
+            }
+            rlogger.warn("repair_writer::wait_for_writer_done failed: {}", ep);
+            return make_exception_future<>(std::move(ep));
         });
     }
 };
