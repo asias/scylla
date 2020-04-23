@@ -50,6 +50,10 @@ size_t local_strategy::get_replication_factor() const {
     return 1;
 }
 
+bool local_strategy::allow_remove_node_being_replaced_from_natural_endpoints() const {
+    return false;
+}
+
 using registry = class_registrator<abstract_replication_strategy, local_strategy, const sstring&, token_metadata&, snitch_ptr&, const std::map<sstring, sstring>&>;
 static registry registrator("org.apache.cassandra.locator.LocalStrategy");
 static registry registrator_short_name("LocalStrategy");
