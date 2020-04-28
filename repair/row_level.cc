@@ -2181,6 +2181,7 @@ future<> repair_init_messaging_service_handler(repair_service& rs, distributed<d
 class row_level_repair {
     repair_info& _ri;
     sstring _cf_name;
+    utils::UUID _table_id;
     dht::token_range _range;
     std::vector<gms::inet_address> _all_live_peer_nodes;
     column_family& _cf;
@@ -2230,13 +2231,15 @@ class row_level_repair {
 public:
     row_level_repair(repair_info& ri,
             sstring cf_name,
+            utils::UUID table_id,
             dht::token_range range,
             std::vector<gms::inet_address> all_live_peer_nodes)
         : _ri(ri)
         , _cf_name(std::move(cf_name))
+        , _table_id(std::move(table_id))
         , _range(std::move(range))
         , _all_live_peer_nodes(std::move(all_live_peer_nodes))
-        , _cf(_ri.db.local().find_column_family(_ri.keyspace, _cf_name))
+        , _cf(_ri.db.local().find_column_family(_table_id))
         , _all_nodes(_all_live_peer_nodes)
         , _seed(get_random_seed()) {
     }
@@ -2538,9 +2541,9 @@ public:
 };
 
 future<> repair_cf_range_row_level(repair_info& ri,
-        sstring cf_name, dht::token_range range,
+        sstring cf_name, utils::UUID table_id, dht::token_range range,
         const std::vector<gms::inet_address>& all_peer_nodes) {
-    return do_with(row_level_repair(ri, std::move(cf_name), std::move(range), all_peer_nodes), [] (row_level_repair& repair) {
+    return do_with(row_level_repair(ri, std::move(cf_name), std::move(table_id), std::move(range), all_peer_nodes), [] (row_level_repair& repair) {
         return repair.run();
     });
 }
