@@ -680,6 +680,7 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , replace_token(this, "replace_token", value_status::Used, "", "The tokens of the node to replace. Same as -Dcassandra.replace_token in cassandra.")
     , replace_address(this, "replace_address", value_status::Used, "", "The listen_address or broadcast_address of the dead node to replace. Same as -Dcassandra.replace_address.")
     , replace_address_first_boot(this, "replace_address_first_boot", value_status::Used, "", "Like replace_address option, but if the node has been bootstrapped successfully it will be ignored. Same as -Dcassandra.replace_address_first_boot.")
+    , addnode_address(this, "addnode_address", value_status::Used, "", "The address of the coordinator to add multiple node in parallel") \
     , override_decommission(this, "override_decommission", value_status::Used, false, "Set true to force a decommissioned node to join the cluster")
     , enable_repair_based_node_ops(this, "enable_repair_based_node_ops", liveness::LiveUpdate, value_status::Used, true, "Set true to use enable repair based node operations instead of streaming based")
     , ring_delay_ms(this, "ring_delay_ms", value_status::Used, 30 * 1000, "Time a node waits to hear from other nodes before joining the ring in milliseconds. Same as -Dcassandra.ring_delay_ms in cassandra.")

@@ -97,6 +97,9 @@ static const sstring SSTABLE_FORMAT_PARAM_NAME = "sstable_format";
 
 distributed<storage_service> _the_storage_service;
 
+class addnode_info;
+void addnode_init_ms();
+future<> addnode_uninit_ms();
 
 int get_generation_number() {
     using namespace std::chrono;
@@ -552,30 +555,37 @@ void storage_service::join_token_ring(int delay) {
         set_mode(mode::JOINING, "calculation complete, ready to bootstrap", true);
         slogger.debug("... got ring + schema info");
 
-        auto t = gms::gossiper::clk::now();
-        while (get_property_rangemovement() &&
-            (!_token_metadata.get_bootstrap_tokens().empty() ||
-             !_token_metadata.get_leaving_endpoints().empty())) {
-            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(gms::gossiper::clk::now() - t).count();
-            slogger.info("Checking bootstrapping/leaving nodes: tokens {}, leaving {}, sleep 1 second and check again ({} seconds elapsed)",
-                _token_metadata.get_bootstrap_tokens().size(),
-                _token_metadata.get_leaving_endpoints().size(),
-                elapsed);
+        if (!is_addnode_mode()) {
+            auto t = gms::gossiper::clk::now();
+            while (get_property_rangemovement() &&
+                (!_token_metadata.get_bootstrap_tokens().empty() ||
+                 !_token_metadata.get_leaving_endpoints().empty())) {
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(gms::gossiper::clk::now() - t).count();
+                slogger.info("Checking bootstrapping/leaving nodes: tokens {}, leaving {}, sleep 1 second and check again ({} seconds elapsed)",
+                    _token_metadata.get_bootstrap_tokens().size(),
+                    _token_metadata.get_leaving_endpoints().size(),
+                    elapsed);
 
-            sleep_abortable(std::chrono::seconds(1), _abort_source).get();
+                sleep_abortable(std::chrono::seconds(1), _abort_source).get();
 
-            if (gms::gossiper::clk::now() > t + std::chrono::seconds(60)) {
-                throw std::runtime_error("Other bootstrapping/leaving nodes detected, cannot bootstrap while consistent_rangemovement is true");
+                if (gms::gossiper::clk::now() > t + std::chrono::seconds(60)) {
+                    throw std::runtime_error("Other bootstrapping/leaving nodes detected, cannot bootstrap while consistent_rangemovement is true");
+                }
+
+                // Check the schema and pending range again
+                while (!get_local_migration_manager().have_schema_agreement()) {
+                    set_mode(mode::JOINING, "waiting for schema information to complete", true);
+                    sleep_abortable(std::chrono::seconds(1), _abort_source).get();
+                }
+                update_pending_ranges().get();
             }
-
-            // Check the schema and pending range again
+            slogger.info("Checking bootstrapping/leaving nodes: ok");
+        } else {
             while (!get_local_migration_manager().have_schema_agreement()) {
                 set_mode(mode::JOINING, "waiting for schema information to complete", true);
                 sleep_abortable(std::chrono::seconds(1), _abort_source).get();
             }
-            update_pending_ranges().get();
         }
-        slogger.info("Checking bootstrapping/leaving nodes: ok");
 
         if (!db().local().is_replacing()) {
             if (_token_metadata.is_member(get_broadcast_address())) {
@@ -591,8 +601,12 @@ void storage_service::join_token_ring(int delay) {
                     slogger.info("Using newly generated tokens = {}", _bootstrap_tokens);
                 }
             } else {
-                _bootstrap_tokens = boot_strapper::get_bootstrap_tokens(_token_metadata, _db.local());
-                slogger.info("Using newly generated tokens = {}", _bootstrap_tokens);
+                if (!is_addnode_mode()) {
+                    _bootstrap_tokens = boot_strapper::get_bootstrap_tokens(_token_metadata, _db.local());
+                    slogger.info("Using newly generated tokens = {}", _bootstrap_tokens);
+                } else {
+                    slogger.info("Using generated tokens from coordinator");
+                }
             }
         } else {
             auto replace_addr = db().local().get_replace_address();
@@ -622,8 +636,12 @@ void storage_service::join_token_ring(int delay) {
         }
         maybe_start_sys_dist_ks();
         mark_existing_views_as_built();
-        db::system_keyspace::update_tokens(_bootstrap_tokens).get();
-        bootstrap(); // blocks until finished
+        if (is_addnode_mode() && !db().local().is_replacing()) {
+            _bootstrap_tokens = bootstrap_multiple_node_in_parallel();
+        } else {
+            db::system_keyspace::update_tokens(_bootstrap_tokens).get();
+            bootstrap(); // blocks until finished
+        }
     } else {
         maybe_start_sys_dist_ks();
         size_t num_tokens = _db.local().get_config().num_tokens();
@@ -1744,7 +1762,7 @@ future<> storage_service::check_for_endpoint_collision(const std::unordered_map<
                 throw std::runtime_error(sprint("A node with address %s already exists, cancelling join. "
                     "Use replace_address if you want to replace this node.", addr));
             }
-            if (dht::range_streamer::use_strict_consistency()) {
+            if (dht::range_streamer::use_strict_consistency() && !is_addnode_mode()) {
                 found_bootstrapping_node = false;
                 for (auto& x : _gossiper.get_endpoint_states()) {
                     auto state = _gossiper.get_gossip_status(x.second);
@@ -2555,6 +2573,18 @@ future<> storage_service::removenode(sstring host_id_string) {
     });
 }
 
+future<> storage_service::addnode(uint32_t num_nodes) {
+   return run_with_api_lock(sstring("addnode"), [num_nodes] (storage_service& ss) {
+        if (ss.get_addnode_info()) {
+            throw std::runtime_error("`nodetool addnode` in progress");
+        }
+        ss.set_addnode_info(make_shared<addnode_info>(ss._db, num_nodes, ss._token_metadata));
+        slogger.info("Start as addnode coordinator to add {} nodes", num_nodes);
+        return make_ready_future<>();
+   });
+}
+
+
 // Runs inside seastar::async context
 void storage_service::flush_column_families() {
     service::get_storage_service().invoke_on_all([] (auto& ss) {
@@ -3235,11 +3265,15 @@ void storage_service::init_messaging_service() {
     ms.register_replication_finished([] (gms::inet_address from) {
         return get_local_storage_service().confirm_replication(from);
     });
+	addnode_init_ms();
 }
 
 future<> storage_service::uninit_messaging_service() {
     auto& ms = netw::get_local_messaging_service();
-    return ms.unregister_replication_finished();
+    return when_all_succeed(
+        ms.unregister_replication_finished(),
+        addnode_uninit_ms()
+    );
 }
 
 void storage_service::do_isolate_on_error(disk_error type)
@@ -3569,6 +3603,281 @@ future<bool> storage_service::is_cleanup_allowed(sstring keyspace) {
 bool storage_service::is_repair_based_node_ops_enabled() {
     return _db.local().get_config().enable_repair_based_node_ops();
 }
+
+struct boot_parameter {
+    std::unordered_set<dht::token> tokens;
+    bool stream_done = false;
+};
+
+class addnode_info {
+    seastar::sharded<database>& _db;
+    size_t _nr_nodes_to_add;
+    std::map<gms::inet_address, boot_parameter> _boot_node_map;
+    boot_status _cluster_status;
+    locator::token_metadata _token_metadata;
+    locator::token_metadata _token_metadata_after;
+private:
+    std::unordered_set<dht::token>
+    get_random_tokens(gms::inet_address node, size_t num_tokens) {
+        auto tokens = dht::boot_strapper::get_random_tokens(_token_metadata_after, num_tokens);
+        // TODO: check if tokens are used by existing nodes or by the new nodes
+        _token_metadata_after.update_normal_tokens(tokens, node);
+        return tokens;
+    }
+
+    std::unordered_map<sstring, std::unordered_map<gms::inet_address, dht::token_range_vector>>
+    get_ranges_to_stream(gms::inet_address node) {
+        std::unordered_map<sstring, std::unordered_map<gms::inet_address, dht::token_range_vector>> ranges_to_stream;
+        // Walk through my talks and get the ranges I need to pull from
+        auto keyspaces = _db.local().get_non_system_keyspaces();
+        for (auto& keyspace : keyspaces) {
+            auto& ks = _db.local().find_keyspace(keyspace);
+            auto& strategy = ks.get_replication_strategy();
+
+            // Get the ranges for the node after new nodes joins the cluster
+            dht::token_range_vector desired_ranges = strategy.get_ranges(node, _token_metadata_after);
+
+            // Get the token_range to addresses mapping before the new nodes join the cluster
+            auto range_addresses = strategy.get_range_addresses(_token_metadata);
+
+            // Find which node contains the desired_range in the existing cluster
+            for (auto& desired_range : desired_ranges) {
+                auto found = false;
+                for (auto& x : range_addresses) {
+                    const range<token>& src_range = x.first;
+                    if (src_range.contains(desired_range, dht::tri_compare)) {
+                        std::vector<inet_address>& addresses = x.second;
+                        // TODO: choose better node
+                        ranges_to_stream[keyspace][addresses.front()].push_back(desired_range);
+                        found = true;
+                    }
+                }
+
+                if (!found) {
+                    throw std::runtime_error(sprint("No sources found for %s", desired_range));
+                }
+            }
+        }
+        return ranges_to_stream;
+    }
+
+    bool seen_all_nodes() {
+        return _boot_node_map.size() == _nr_nodes_to_add;
+    }
+
+    void may_seen_all_nodes() {
+        if (seen_all_nodes()) {
+            _cluster_status = boot_status::all_nodes_can_stream;
+        }
+    }
+
+    void may_all_stream_done() {
+        // all node has finished streaming
+        if (std::all_of(_boot_node_map.begin(), _boot_node_map.end(), [] (auto& x) { return x.second.stream_done == true; })) {
+            _cluster_status = boot_status::all_nodes_stream_done;
+        }
+    }
+
+public:
+    addnode_info(
+            seastar::sharded<database>& db, 
+            size_t nr_nodes_to_add,
+            locator::token_metadata tm)
+            : _db(db)
+            , _nr_nodes_to_add(nr_nodes_to_add)
+            , _token_metadata(std::move(tm))
+            , _token_metadata_after(_token_metadata) {
+    }
+
+    std::unordered_set<dht::token> 
+    get_tokens(gms::inet_address node, size_t num_tokens) {
+        auto& boot_param = _boot_node_map[node];
+        if (boot_param.tokens.empty()) {
+            boot_param.tokens = get_random_tokens(node, num_tokens);
+        }
+        may_seen_all_nodes();
+        return boot_param.tokens;
+    }
+
+    std::unordered_map<sstring, std::unordered_map<gms::inet_address, dht::token_range_vector>>
+    get_ranges(gms::inet_address node) {
+        if (_cluster_status != boot_status::all_nodes_can_stream) {
+            return {};
+        }
+        auto it = _boot_node_map.find(node);
+        if (it == _boot_node_map.end()) {
+            throw std::runtime_error("Node is not in the add boot list");
+        }
+        return get_ranges_to_stream(node);
+    }
+
+    boot_status set_stream_done(gms::inet_address node) {
+        auto it = _boot_node_map.find(node);
+        if (it == _boot_node_map.end()) {
+            throw std::runtime_error("Node is not in the addnode list");
+        }
+        it->second.stream_done = true;
+        may_all_stream_done();
+        return _cluster_status;
+    }
+
+    boot_status get_cluster_status() {
+        return _cluster_status;
+    }
+
+private:
+    static shared_ptr<addnode_info> get_addnode_info(storage_service& ss)  {
+        auto addnode = ss.get_addnode_info();
+        if (!addnode) {
+            throw std::runtime_error("Did you run `nodetool addnode start` on this node?");
+        }
+        return addnode;
+    }
+
+public:
+    // RPC handler
+    static future<std::unordered_set<dht::token>>
+    addnode_get_tokens_rpc_handler(gms::inet_address node, uint32_t num_tokens) {
+        return get_storage_service().invoke_on(0, [node, num_tokens] (storage_service& ss) {
+            return get_addnode_info(ss)->get_tokens(node, num_tokens);
+        });
+    }
+
+    static future<std::unordered_map<sstring, std::unordered_map<gms::inet_address, dht::token_range_vector>>>
+    addnode_get_ranges_rpc_handler(gms::inet_address node) {
+        return get_storage_service().invoke_on(0, [node] (storage_service& ss) {
+            return get_addnode_info(ss)->get_ranges(node);
+        });
+    }
+
+    static future<boot_status>
+    addnode_set_stream_done_rpc_handler(gms::inet_address node) {
+        return get_storage_service().invoke_on(0, [node] (storage_service& ss) {
+            return get_addnode_info(ss)->set_stream_done(node);
+        });
+    }
+
+    static future<boot_status>
+    addnode_get_cluster_status_rpc_handler(gms::inet_address node) {
+        return get_storage_service().invoke_on(0, [node] (storage_service& ss) {
+            return get_addnode_info(ss)->get_cluster_status();
+        });
+    }
+
+	static void init_ms() {
+   		auto& ms = netw::get_local_messaging_service();
+		ms.register_addnode_get_tokens([] (const rpc::client_info& cinfo, uint32_t num_tokens) {
+        	const auto& from = cinfo.retrieve_auxiliary<gms::inet_address>("baddr");
+			return addnode_get_tokens_rpc_handler(from, num_tokens);
+		});
+		ms.register_addnode_get_ranges([] (const rpc::client_info& cinfo) {
+        	const auto& from = cinfo.retrieve_auxiliary<gms::inet_address>("baddr");
+			return addnode_get_ranges_rpc_handler(from);
+		});
+		ms.register_addnode_set_stream_done([] (const rpc::client_info& cinfo) {
+        	const auto& from = cinfo.retrieve_auxiliary<gms::inet_address>("baddr");
+			return addnode_set_stream_done_rpc_handler(from);
+		});
+		ms.register_addnode_get_cluster_status([] (const rpc::client_info& cinfo) {
+        	const auto& from = cinfo.retrieve_auxiliary<gms::inet_address>("baddr");
+			return addnode_get_cluster_status_rpc_handler(from);
+		});
+	}
+
+	static future<> uninit_ms() {
+   		auto& ms = netw::get_local_messaging_service();
+        return when_all_succeed(
+            ms.unregister_addnode_get_tokens(),
+            ms.unregister_addnode_get_ranges(),
+            ms.unregister_addnode_set_stream_done(),
+            ms.unregister_addnode_get_cluster_status()
+        );
+	}
+};
+
+void addnode_init_ms() {
+    addnode_info::init_ms();
+}
+
+future<> addnode_uninit_ms() {
+    return addnode_info::uninit_ms();
+}
+
+bool storage_service::is_addnode_mode() {
+    return !_db.local().get_config().addnode_address().empty();
+}
+
+// New node bootstrapp code
+// Run in thread
+std::unordered_set<dht::token> storage_service::bootstrap_multiple_node_in_parallel() {
+    _is_bootstrap_mode = true;
+
+    size_t num_tokens = _db.local().get_config().num_tokens();
+    auto coordinator_node = netw::msg_addr{gms::inet_address(_db.local().get_config().addnode_address()), 0};
+
+    // Ask the coordinator node to allocate tokens for this local
+    auto tokens = netw::get_local_messaging_service().send_addnode_get_tokens(coordinator_node, num_tokens).get0();
+    slogger.info("Got tokens={} from coordinator node={}", tokens, coordinator_node.addr);
+
+    // Announce tokens
+    db::system_keyspace::update_tokens(tokens).get();
+    // Wait until we know tokens of existing node before announcing join status.
+    _gossiper.wait_for_range_setup().get();
+    // if not an existing token then bootstrap
+    _gossiper.add_local_application_state({
+        { gms::application_state::TOKENS, versioned_value::tokens(tokens) },
+        { gms::application_state::CDC_STREAMS_TIMESTAMP, versioned_value::cdc_streams_timestamp(_cdc_streams_ts) },
+        { gms::application_state::STATUS, versioned_value::bootstrapping(tokens) },
+    }).get();
+    _gossiper.wait_for_range_setup().get();
+    _gossiper.check_seen_seeds();
+
+    slogger.info("Done announce bootstrap tokens");
+
+    // Wait until the coordinator node has seen all the bootstrap node so it can decide which ranges to stream
+    std::unordered_map<sstring, std::unordered_map<gms::inet_address, dht::token_range_vector>> ranges;
+    while (true) {
+        ranges = netw::get_local_messaging_service().send_addnode_get_ranges(coordinator_node).get0();
+        slogger.info("Got ranges={} from coordinator node={}", ranges.size(), coordinator_node.addr);
+        if (!ranges.empty()) {
+            break;
+        }
+        sleep(std::chrono::seconds(1)).get();
+    }
+
+    // Wait until all nodes in the cluster knows bootstrap tokens of nodes to be added in parallel.
+    // TODO: need the "gossip: Make boot process faster and safer" hash
+
+    // Stream the ranges
+    auto streamer = make_lw_shared<dht::range_streamer>(_db, _token_metadata, _abort_source, get_broadcast_address(), "ParallelBootstrap", streaming::stream_reason::bootstrap);
+    for (auto& x : ranges) {
+        streamer->add_rx_ranges(std::move(x.first), std::move(x.second));
+    }
+    slogger.info("Started stream for addnode");
+    streamer->stream_async().get();
+    slogger.info("Finished stream for addnode");
+
+
+    // Tell coordinator node this node has finisehd streaming
+    auto status = netw::get_local_messaging_service().send_addnode_set_stream_done(coordinator_node).get0();
+    slogger.info("Set stream done");
+    slogger.info("Get cluster status={}", int(status));
+    if (status == boot_status::all_nodes_stream_done) {
+        return tokens;
+    }
+
+    // Wait until all the nodes has finished the streaming
+    while (true) {
+        auto status = netw::get_local_messaging_service().send_addnode_get_cluster_status(coordinator_node).get0();
+        slogger.info("Get cluster status={}", int(status));
+        if (status == boot_status::all_nodes_stream_done) {
+            break;
+        }
+        sleep(std::chrono::seconds(1)).get();
+    }
+    return tokens;
+}
+
 
 } // namespace service
 

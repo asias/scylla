@@ -1341,6 +1341,9 @@ token_metadata_impl::interval_to_range(boost::icl::interval<token>::interval_typ
 
 void token_metadata_impl::set_pending_ranges(const sstring& keyspace_name,
         std::unordered_multimap<range<token>, inet_address> new_pending_ranges) {
+    for (auto& x : new_pending_ranges) {
+        tlogger.info("set_pending_ranges: keyspace={}, node={}, range={}", keyspace_name, x.second, x.first);
+    }
     if (new_pending_ranges.empty()) {
         _pending_ranges.erase(keyspace_name);
         _pending_ranges_map.erase(keyspace_name);

@@ -58,3 +58,11 @@ enum class stream_mutation_fragments_cmd : uint8_t {
 };
 
 }
+
+namespace service {
+enum class boot_status : int8_t {
+    all_nodes_can_stream,
+    all_nodes_stream_done,
+};
+}
+
