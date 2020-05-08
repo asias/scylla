@@ -91,7 +91,13 @@ range_streamer::get_range_fetch_map(const std::unordered_map<dht::token_range, s
         }
 
         if (!found_source) {
-            throw std::runtime_error(format("unable to find sufficient sources for streaming range {} in keyspace {}", range_, keyspace));
+            auto& ks = _db.local().find_keyspace(keyspace);
+            auto rf = ks.get_replication_strategy().get_replication_factor();
+            if (rf == 1) {
+                logger.warn("Unable to find sufficient sources to stream range {} for keyspace {} with RF = 1", range_, keyspace);
+            } else {
+                throw std::runtime_error(format("unable to find sufficient sources for streaming range {} in keyspace {}", range_, keyspace));
+            }
         }
     }
 
