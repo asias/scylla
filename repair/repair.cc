@@ -648,6 +648,10 @@ get_partitioner_for_tables(seastar::sharded<database>& db, const sstring& keyspa
         }
         last_s = std::move(s);
     }
+    if (!last_s) {
+        throw std::runtime_error(format("Failed to find partitioner for keyspace={}, tables={}, no table in this keyspace",
+                keyspace, names));
+    }
     return last_s->get_partitioner();
 }
 
@@ -657,7 +661,8 @@ repair_info::repair_info(seastar::sharded<database>& db_,
     const std::vector<sstring>& cfs_,
     int id_,
     const std::vector<sstring>& data_centers_,
-    const std::vector<sstring>& hosts_)
+    const std::vector<sstring>& hosts_,
+    streaming::stream_reason reason_)
     : db(db_)
     , partitioner(get_partitioner_for_tables(db_, keyspace_, cfs_))
     , keyspace(keyspace_)
@@ -667,6 +672,7 @@ repair_info::repair_info(seastar::sharded<database>& db_,
     , shard(engine().cpu_id())
     , data_centers(data_centers_)
     , hosts(hosts_)
+    , reason(reason_)
     , _row_level_repair(db.local().features().cluster_supports_row_level_repair()) {
 }
 
@@ -1447,7 +1453,7 @@ static int do_repair_start(seastar::sharded<database>& db, sstring keyspace,
                     data_centers = options.data_centers, hosts = options.hosts] (database& localdb) mutable {
                 auto ri = make_lw_shared<repair_info>(db,
                         std::move(keyspace), std::move(ranges), std::move(cfs),
-                        id, std::move(data_centers), std::move(hosts));
+                        id, std::move(data_centers), std::move(hosts), streaming::stream_reason::repair);
                 return repair_ranges(ri);
             });
             repair_results.push_back(std::move(f));
@@ -1509,24 +1515,29 @@ future<> repair_abort_all(seastar::sharded<database>& db) {
 future<> sync_data_using_repair(seastar::sharded<database>& db,
         sstring keyspace,
         dht::token_range_vector ranges,
-        std::unordered_map<dht::token_range, repair_neighbors> neighbors) {
+        std::unordered_map<dht::token_range, repair_neighbors> neighbors,
+        streaming::stream_reason reason) {
     if (ranges.empty()) {
         return make_ready_future<>();
     }
-    return smp::submit_to(0, [&db, keyspace = std::move(keyspace), ranges = std::move(ranges), neighbors = std::move(neighbors)] () mutable {
+    return smp::submit_to(0, [&db, keyspace = std::move(keyspace), ranges = std::move(ranges), neighbors = std::move(neighbors), reason] () mutable {
         int id = repair_tracker().next_repair_command();
         rlogger.info("repair id {} to sync data for keyspace={}, status=started", id, keyspace);
-        return repair_tracker().run(id, [id, &db, keyspace, ranges = std::move(ranges), neighbors = std::move(neighbors)] () mutable {
+        return repair_tracker().run(id, [id, &db, keyspace, ranges = std::move(ranges), neighbors = std::move(neighbors), reason] () mutable {
             auto cfs = list_column_families(db.local(), keyspace);
+            if (cfs.empty()) {
+                rlogger.warn("repair id {} to sync data for keyspace={}, no table in this keyspace", id, keyspace);
+                return make_ready_future<>();
+            }
             std::vector<future<>> repair_results;
             repair_results.reserve(smp::count);
             for (auto shard : boost::irange(unsigned(0), smp::count)) {
-                auto f = db.invoke_on(shard, [keyspace, cfs, id, ranges, neighbors] (database& localdb) mutable {
+                auto f = db.invoke_on(shard, [keyspace, cfs, id, ranges, neighbors, reason] (database& localdb) mutable {
                     auto data_centers = std::vector<sstring>();
                     auto hosts = std::vector<sstring>();
                     auto ri = make_lw_shared<repair_info>(service::get_local_storage_service().db(),
                             std::move(keyspace), std::move(ranges), std::move(cfs),
-                            id, std::move(data_centers), std::move(hosts));
+                            id, std::move(data_centers), std::move(hosts), reason);
                     ri->neighbors = std::move(neighbors);
                     return repair_ranges(ri);
                 });
@@ -1548,7 +1559,11 @@ future<> sync_data_using_repair(seastar::sharded<database>& db,
             });
         }).then([id, keyspace] {
             rlogger.info("repair id {} to sync data for keyspace={}, status=succeeded", id, keyspace);
-        }).handle_exception([id, keyspace] (std::exception_ptr ep) {
+        }).handle_exception([&db, id, keyspace] (std::exception_ptr ep) {
+            if (!db.local().has_keyspace(keyspace)) {
+                rlogger.warn("repair id {} to sync data for keyspace={}, status=failed: keyspace does not exist any more, ignoring it, {}", id, keyspace, ep);
+                return make_ready_future<>();
+            }
             rlogger.info("repair id {} to sync data for keyspace={}, status=failed: {}", id, keyspace,  ep);
             return make_exception_future<>(ep);
         });
@@ -1561,6 +1576,7 @@ future<> bootstrap_with_repair(seastar::sharded<database>& db, locator::token_me
         auto keyspaces = db.local().get_non_system_keyspaces();
         rlogger.info("bootstrap_with_repair: started with keyspaces={}", keyspaces);
         auto myip = utils::fb_utilities::get_broadcast_address();
+        auto reason = streaming::stream_reason::bootstrap;
         for (auto& keyspace_name : keyspaces) {
             if (!db.local().has_keyspace(keyspace_name)) {
                 rlogger.info("bootstrap_with_repair: keyspace={} does not exist any more, ignoring it", keyspace_name);
@@ -1693,7 +1709,7 @@ future<> bootstrap_with_repair(seastar::sharded<database>& db, locator::token_me
                 }
             }
             auto nr_ranges = desired_ranges.size();
-            sync_data_using_repair(db, keyspace_name, std::move(desired_ranges), std::move(range_sources)).get();
+            sync_data_using_repair(db, keyspace_name, std::move(desired_ranges), std::move(range_sources), reason).get();
             rlogger.info("bootstrap_with_repair: finished with keyspace={}, nr_ranges={}", keyspace_name, nr_ranges);
         }
         rlogger.info("bootstrap_with_repair: finished with keyspaces={}", keyspaces);
@@ -1707,6 +1723,7 @@ future<> do_decommission_removenode_with_repair(seastar::sharded<database>& db, 
         auto keyspaces = db.local().get_non_system_keyspaces();
         bool is_removenode = myip != leaving_node;
         auto op = is_removenode ? "removenode_with_repair" : "decommission_with_repair";
+        streaming::stream_reason reason = is_removenode ? streaming::stream_reason::removenode : streaming::stream_reason::decommission;
         rlogger.info("{}: started with keyspaces={}, leaving_node={}", op, keyspaces, leaving_node);
         for (auto& keyspace_name : keyspaces) {
             if (!db.local().has_keyspace(keyspace_name)) {
@@ -1844,7 +1861,7 @@ future<> do_decommission_removenode_with_repair(seastar::sharded<database>& db, 
                 ranges.swap(ranges_for_removenode);
             }
             auto nr_ranges_synced = ranges.size();
-            sync_data_using_repair(db, keyspace_name, std::move(ranges), std::move(range_sources)).get();
+            sync_data_using_repair(db, keyspace_name, std::move(ranges), std::move(range_sources), reason).get();
             rlogger.info("{}: finished with keyspace={}, leaving_node={}, nr_ranges={}, nr_ranges_synced={}, nr_ranges_skipped={}",
                 op, keyspace_name, leaving_node, nr_ranges_total, nr_ranges_synced, nr_ranges_skipped);
         }
@@ -1860,8 +1877,8 @@ future<> removenode_with_repair(seastar::sharded<database>& db, locator::token_m
     return do_decommission_removenode_with_repair(db, std::move(tm), std::move(leaving_node));
 }
 
-future<> do_rebuild_replace_with_repair(seastar::sharded<database>& db, locator::token_metadata tm, sstring op, sstring source_dc) {
-    return seastar::async([&db, tm = std::move(tm), source_dc = std::move(source_dc), op = std::move(op)] () mutable {
+future<> do_rebuild_replace_with_repair(seastar::sharded<database>& db, locator::token_metadata tm, sstring op, sstring source_dc, streaming::stream_reason reason) {
+    return seastar::async([&db, tm = std::move(tm), source_dc = std::move(source_dc), op = std::move(op), reason] () mutable {
         auto keyspaces = db.local().get_non_system_keyspaces();
         rlogger.info("{}: started with keyspaces={}, source_dc={}", op, keyspaces, source_dc);
         auto myip = utils::fb_utilities::get_broadcast_address();
@@ -1898,7 +1915,7 @@ future<> do_rebuild_replace_with_repair(seastar::sharded<database>& db, locator:
                 }
             }
             auto nr_ranges = ranges.size();
-            sync_data_using_repair(db, keyspace_name, std::move(ranges), std::move(range_sources)).get();
+            sync_data_using_repair(db, keyspace_name, std::move(ranges), std::move(range_sources), reason).get();
             rlogger.info("{}: finished with keyspace={}, source_dc={}, nr_ranges={}", op, keyspace_name, source_dc, nr_ranges);
         }
         rlogger.info("{}: finished with keyspaces={}, source_dc={}", op, keyspaces, source_dc);
@@ -1910,11 +1927,13 @@ future<> rebuild_with_repair(seastar::sharded<database>& db, locator::token_meta
     if (source_dc.empty()) {
         source_dc = get_local_dc();
     }
-    return do_rebuild_replace_with_repair(db, std::move(tm), std::move(op), std::move(source_dc));
+    auto reason = streaming::stream_reason::rebuild;
+    return do_rebuild_replace_with_repair(db, std::move(tm), std::move(op), std::move(source_dc), reason);
 }
 
 future<> replace_with_repair(seastar::sharded<database>& db, locator::token_metadata tm) {
     auto op = sstring("replace_with_repair");
     auto source_dc = get_local_dc();
-    return do_rebuild_replace_with_repair(db, std::move(tm), std::move(op), std::move(source_dc));
+    auto reason = streaming::stream_reason::bootstrap;
+    return do_rebuild_replace_with_repair(db, std::move(tm), std::move(op), std::move(source_dc), reason);
 }

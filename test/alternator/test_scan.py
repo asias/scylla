@@ -42,6 +42,11 @@ def test_scan_basic(filled_test_table):
         assert len(items) == len(got_items)
         assert multiset(items) == multiset(got_items)
 
+def test_scan_nonexistent_table(dynamodb):
+    client = dynamodb.meta.client
+    with pytest.raises(ClientError, match="ResourceNotFoundException"):
+        client.scan(TableName="i_do_not_exist")
+
 def test_scan_with_paginator(dynamodb, filled_test_table):
     test_table, items = filled_test_table
     paginator = dynamodb.meta.client.get_paginator('scan')
@@ -239,7 +244,6 @@ def test_scan_select(filled_test_table):
 # a scan into multiple parts, and that these parts are in fact disjoint,
 # and their union is the entire contents of the table. We do not actually
 # try to run these queries in *parallel* in this test.
-@pytest.mark.xfail(reason="parallel scan not supported yet")
 def test_scan_parallel(filled_test_table):
     test_table, items = filled_test_table
     for nsegments in [1, 2, 17]:
@@ -250,3 +254,14 @@ def test_scan_parallel(filled_test_table):
         # The following comparison verifies that each of the expected item
         # in items was returned in one - and just one - of the segments.
         assert multiset(items) == multiset(got_items)
+
+# Test correct handling of incorrect parallel scan parameters.
+# Most of the corner cases (like TotalSegments=0) are validated
+# by boto3 itself, but some checks can still be performed.
+def test_scan_parallel_incorrect(filled_test_table):
+    test_table, items = filled_test_table
+    with pytest.raises(ClientError, match='ValidationException.*Segment'):
+        full_scan(test_table, TotalSegments=1000001, Segment=0)
+    for segment in [7, 9]:
+        with pytest.raises(ClientError, match='ValidationException.*Segment'):
+            full_scan(test_table, TotalSegments=5, Segment=segment)

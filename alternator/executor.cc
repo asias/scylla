@@ -208,12 +208,11 @@ get_table_or_view(service::storage_proxy& proxy, const rjson::value& request) {
             throw api_error("ValidationException",
                     format("Non-string IndexName '{}'", index_name->GetString()));
         }
-    }
-
-    // If no tables for global indexes were found, the index may be local
-    if (!proxy.get_db().local().has_schema(keyspace_name, table_name)) {
-        type = table_or_view_type::lsi;
-        table_name = lsi_name(orig_table_name, index_name->GetString());
+        // If no tables for global indexes were found, the index may be local
+        if (!proxy.get_db().local().has_schema(keyspace_name, table_name)) {
+            type = table_or_view_type::lsi;
+            table_name = lsi_name(orig_table_name, index_name->GetString());
+        }
     }
 
     try {
@@ -1019,13 +1018,22 @@ put_or_delete_item::put_or_delete_item(const rjson::value& item, schema_ptr sche
 
 mutation put_or_delete_item::build(schema_ptr schema, api::timestamp_type ts) {
     mutation m(schema, _pk);
-    auto& row = m.partition().clustered_row(*schema, _ck);
+    // If there's no clustering key, a tombstone should be created directly
+    // on a partition, not on a clustering row - otherwise it will look like
+    // an open-ended range tombstone, which will crash on KA/LA sstable format.
+    // Ref: #6035
+    const bool use_partition_tombstone = schema->clustering_key_size() == 0;
     if (!_cells) {
-        // a DeleteItem operation:
-        row.apply(tombstone(ts, gc_clock::now()));
+        if (use_partition_tombstone) {
+            m.partition().apply(tombstone(ts, gc_clock::now()));
+        } else {
+            // a DeleteItem operation:
+            m.partition().clustered_row(*schema, _ck).apply(tombstone(ts, gc_clock::now()));
+        }
         return m;
     }
     // else, a PutItem operation:
+    auto& row = m.partition().clustered_row(*schema, _ck);
     attribute_collector attrs_collector;
     for (auto& c : *_cells) {
         const column_definition* cdef = schema->get_column_definition(c.column_name);
@@ -1048,7 +1056,11 @@ mutation put_or_delete_item::build(schema_ptr schema, api::timestamp_type ts) {
     // Scylla proper, to implement the operation to replace an entire
     // collection ("UPDATE .. SET x = ..") - see
     // cql3::update_parameters::make_tombstone_just_before().
-    row.apply(tombstone(ts-1, gc_clock::now()));
+    if (use_partition_tombstone) {
+        m.partition().apply(tombstone(ts-1, gc_clock::now()));
+    } else {
+        row.apply(tombstone(ts-1, gc_clock::now()));
+    }
     return m;
 }
 
@@ -2889,6 +2901,7 @@ static future<executor::request_return_type> do_query(schema_ptr schema,
         uint32_t limit,
         db::consistency_level cl,
         ::shared_ptr<cql3::restrictions::statement_restrictions> filtering_restrictions,
+        query::partition_slice::option_set custom_opts,
         service::client_state& client_state,
         cql3::cql_stats& cql_stats,
         tracing::trace_state_ptr trace_state,
@@ -2909,7 +2922,9 @@ static future<executor::request_return_type> do_query(schema_ptr schema,
     auto regular_columns = boost::copy_range<query::column_id_vector>(
             schema->regular_columns() | boost::adaptors::transformed([] (const column_definition& cdef) { return cdef.id; }));
     auto selection = cql3::selection::selection::wildcard(schema);
-    auto partition_slice = query::partition_slice(std::move(ck_bounds), {}, std::move(regular_columns), selection->get_query_options());
+    query::partition_slice::option_set opts = selection->get_query_options();
+    opts.add(custom_opts);
+    auto partition_slice = query::partition_slice(std::move(ck_bounds), {}, std::move(regular_columns), opts);
     auto command = ::make_lw_shared<query::read_command>(schema->id(), schema->version(), partition_slice, query::max_partitions);
 
     auto query_state_ptr = std::make_unique<service::query_state>(client_state, trace_state, std::move(permit));
@@ -2939,11 +2954,38 @@ static future<executor::request_return_type> do_query(schema_ptr schema,
     });
 }
 
+static dht::token token_for_segment(int segment, int total_segments) {
+    assert(total_segments > 1 && segment >= 0 && segment < total_segments);
+    uint64_t delta = std::numeric_limits<uint64_t>::max() / total_segments;
+    return dht::token::from_int64(std::numeric_limits<int64_t>::min() + delta * segment);
+}
+
+static dht::partition_range get_range_for_segment(int segment, int total_segments) {
+    if (total_segments == 1) {
+        return dht::partition_range::make_open_ended_both_sides();
+    }
+    if (segment == 0) {
+        dht::token ending_token = token_for_segment(1, total_segments);
+        return dht::partition_range::make_ending_with(
+                dht::partition_range::bound(dht::ring_position::ending_at(ending_token), false));
+    } else if (segment == total_segments - 1) {
+        dht::token starting_token = token_for_segment(segment, total_segments);
+        return dht::partition_range::make_starting_with(
+                dht::partition_range::bound(dht::ring_position::starting_at(starting_token)));
+    } else {
+        dht::token starting_token = token_for_segment(segment, total_segments);
+        dht::token ending_token = token_for_segment(segment + 1, total_segments);
+        return dht::partition_range::make(
+            dht::partition_range::bound(dht::ring_position::starting_at(starting_token)),
+            dht::partition_range::bound(dht::ring_position::ending_at(ending_token), false)
+        );
+    }
+}
+
 // TODO(sarna):
 // 1. Paging must have 1MB boundary according to the docs. IIRC we do have a replica-side reply size limit though - verify.
 // 2. Filtering - by passing appropriately created restrictions to pager as a last parameter
 // 3. Proper timeouts instead of gc_clock::now() and db::no_timeout
-// 4. Implement parallel scanning via Segments
 future<executor::request_return_type> executor::scan(client_state& client_state, tracing::trace_state_ptr trace_state, service_permit permit, rjson::value request) {
     _stats.api_operations.scan++;
     elogger.trace("Scanning {}", request);
@@ -2954,10 +2996,21 @@ future<executor::request_return_type> executor::scan(client_state& client_state,
         return make_ready_future<request_return_type>(api_error("ValidationException",
                 "FilterExpression is not yet implemented in alternator"));
     }
-    if (get_int_attribute(request, "Segment") || get_int_attribute(request, "TotalSegments")) {
-        // FIXME: need to support parallel scan. See issue #5059.
-        return make_ready_future<request_return_type>(api_error("ValidationException",
-                "Scan Segment/TotalSegments is not yet implemented in alternator"));
+    auto segment = get_int_attribute(request, "Segment");
+    auto total_segments = get_int_attribute(request, "TotalSegments");
+    if (segment || total_segments) {
+        if (!segment || !total_segments) {
+            return make_ready_future<request_return_type>(api_error("ValidationException",
+                    "Both Segment and TotalSegments attributes need to be present for a parallel scan"));
+        }
+        if (*segment < 0 || *segment >= *total_segments) {
+            return make_ready_future<request_return_type>(api_error("ValidationException",
+                    "Segment must be non-negative and less than TotalSegments"));
+        }
+        if (*total_segments < 0 || *total_segments > 1000000) {
+            return make_ready_future<request_return_type>(api_error("ValidationException",
+                    "TotalSegments must be non-negative and less or equal to 1000000"));
+        }
     }
 
     rjson::value* exclusive_start_key = rjson::find(request, "ExclusiveStartKey");
@@ -2976,7 +3029,12 @@ future<executor::request_return_type> executor::scan(client_state& client_state,
 
     auto attrs_to_get = calculate_attrs_to_get(request);
 
-    dht::partition_range_vector partition_ranges{dht::partition_range::make_open_ended_both_sides()};
+    dht::partition_range_vector partition_ranges;
+    if (segment) {
+        partition_ranges.push_back(get_range_for_segment(*segment, *total_segments));
+    } else {
+        partition_ranges.push_back(dht::partition_range::make_open_ended_both_sides());
+    }
     std::vector<query::clustering_range> ck_bounds{query::clustering_range::make_open_ended_both_sides()};
 
     ::shared_ptr<cql3::restrictions::statement_restrictions> filtering_restrictions;
@@ -2986,7 +3044,8 @@ future<executor::request_return_type> executor::scan(client_state& client_state,
         partition_ranges = filtering_restrictions->get_partition_key_ranges(query_options);
         ck_bounds = filtering_restrictions->get_clustering_bounds(query_options);
     }
-    return do_query(schema, exclusive_start_key, std::move(partition_ranges), std::move(ck_bounds), std::move(attrs_to_get), limit, cl, std::move(filtering_restrictions), client_state, _stats.cql_stats, trace_state, std::move(permit));
+    return do_query(schema, exclusive_start_key, std::move(partition_ranges), std::move(ck_bounds), std::move(attrs_to_get), limit, cl,
+            std::move(filtering_restrictions), query::partition_slice::option_set(), client_state, _stats.cql_stats, trace_state, std::move(permit));
 }
 
 static dht::partition_range calculate_pk_bound(schema_ptr schema, const column_definition& pk_cdef, comparison_operator_type op, const rjson::value& attrs) {
@@ -3429,11 +3488,7 @@ future<executor::request_return_type> executor::query(client_state& client_state
     if (rjson::find(request, "FilterExpression")) {
         return make_ready_future<request_return_type>(api_error("ValidationException", "FilterExpression is not yet implemented in alternator"));
     }
-    bool forward = get_bool_attribute(request, "ScanIndexForward", true);
-    if (!forward) {
-        // FIXME: need to support the !forward (i.e., reverse sort order) case. See issue #5153.
-        return make_ready_future<request_return_type>(api_error("ValidationException", "ScanIndexForward=false is not yet implemented in alternator"));
-    }
+    const bool forward = get_bool_attribute(request, "ScanIndexForward", true);
 
     rjson::value* key_conditions = rjson::find(request, "KeyConditions");
     rjson::value* key_condition_expression = rjson::find(request, "KeyConditionExpression");
@@ -3476,7 +3531,10 @@ future<executor::request_return_type> executor::query(client_state& client_state
     }
     verify_all_are_used(request, "ExpressionAttributeValues", used_attribute_values, "KeyConditionExpression");
     verify_all_are_used(request, "ExpressionAttributeNames", used_attribute_names, "KeyConditionExpression");
-    return do_query(schema, exclusive_start_key, std::move(partition_ranges), std::move(ck_bounds), std::move(attrs_to_get), limit, cl, std::move(filtering_restrictions), client_state, _stats.cql_stats, std::move(trace_state), std::move(permit));
+    query::partition_slice::option_set opts;
+    opts.set_if<query::partition_slice::option::reversed>(!forward);
+    return do_query(schema, exclusive_start_key, std::move(partition_ranges), std::move(ck_bounds), std::move(attrs_to_get), limit, cl,
+            std::move(filtering_restrictions), opts, client_state, _stats.cql_stats, std::move(trace_state), std::move(permit));
 }
 
 future<executor::request_return_type> executor::list_tables(client_state& client_state, service_permit permit, rjson::value request) {
@@ -3567,12 +3625,12 @@ static std::map<sstring, sstring> get_network_topology_options(int rf) {
 // manually create the keyspace to override this predefined behavior.
 future<> executor::create_keyspace(std::string_view keyspace_name) {
     sstring keyspace_name_str(keyspace_name);
-    return gms::get_up_endpoint_count().then([this, keyspace_name_str = std::move(keyspace_name_str)] (int up_endpoint_count) {
+    return gms::get_all_endpoint_count().then([this, keyspace_name_str = std::move(keyspace_name_str)] (int endpoint_count) {
         int rf = 3;
-        if (up_endpoint_count < rf) {
+        if (endpoint_count < rf) {
             rf = 1;
-            elogger.warn("Creating keyspace '{}' for Alternator with unsafe RF={} because cluster only has {} live nodes.",
-                    keyspace_name_str, rf, up_endpoint_count);
+            elogger.warn("Creating keyspace '{}' for Alternator with unsafe RF={} because cluster only has {} nodes.",
+                    keyspace_name_str, rf, endpoint_count);
         }
         auto opts = get_network_topology_options(rf);
         auto ksm = keyspace_metadata::new_keyspace(keyspace_name_str, "org.apache.cassandra.locator.NetworkTopologyStrategy", std::move(opts), true);

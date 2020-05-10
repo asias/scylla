@@ -194,13 +194,15 @@ class TestSuite(ABC):
         return self.tests
 
     def add_test_list(self, mode, options):
-        lst = glob.glob(os.path.join(self.path, self.pattern))
+        lst = [ os.path.splitext(os.path.basename(t))[0] for t in glob.glob(os.path.join(self.path, self.pattern)) ]
+        run_first_tests = set(self.cfg.get("run_first", []))
         if lst:
-            lst.sort()
-        long_tests = set(self.cfg.get("long", []))
-        for t in lst:
-            shortname = os.path.splitext(os.path.basename(t))[0]
-            if mode not in ["release", "dev"] and shortname in long_tests:
+            # Some tests are long and are better to be started earlier,
+            # so pop them up while sorting the list
+            lst.sort(key=lambda x: (x not in run_first_tests, x))
+        skip_tests = set(self.cfg.get("skip_in_debug_mode", []))
+        for shortname in lst:
+            if mode not in ["release", "dev"] and shortname in skip_tests:
                 continue
             t = os.path.join(self.name, shortname)
             patterns = options.name if options.name else [t]
@@ -269,6 +271,17 @@ class CqlTestSuite(TestSuite):
     @property
     def pattern(self):
         return "*_test.cql"
+
+class RunTestSuite(TestSuite):
+    """TestSuite for test directory with a 'run' script """
+
+    def add_test(self, shortname, mode, options):
+        test = RunTest(self.next_id, shortname, self, mode, options)
+        self.tests.append(test)
+
+    @property
+    def pattern(self):
+        return "run"
 
 
 class Test:
@@ -471,6 +484,25 @@ class CqlTest(Test):
         if self.is_equal_result is False:
             print_unidiff(self.result, self.reject)
 
+class RunTest(Test):
+    """Run tests in a directory started by a run script"""
+
+    def __init__(self, test_no, shortname, suite, mode, options):
+        super().__init__(test_no, shortname, suite, mode, options)
+        self.path = os.path.join(suite.path, shortname)
+        self.xmlout = os.path.join(options.tmpdir, self.mode, "xml", self.uname + ".xunit.xml")
+        self.args = ["--junit-xml={}".format(self.xmlout)]
+        self.env = { 'SCYLLA': os.path.join("build", self.mode, "scylla") }
+
+    def print_summary(self):
+        print("Output of {} {}:".format(self.path, " ".join(self.args)))
+        print(read_log(self.log_filename))
+
+    async def run(self, options):
+        # This test can and should be killed gently, with SIGTERM, not with SIGKILL
+        self.success = await run_test(self, options, gentle_kill=True, env=self.env)
+        logging.info("Test #%d %s", self.id, "succeeded" if self.success else "failed ")
+        return self
 
 class TabularConsoleOutput:
     """Print test progress to the console"""
@@ -514,7 +546,7 @@ class TabularConsoleOutput:
             print(msg)
 
 
-async def run_test(test, options):
+async def run_test(test, options, gentle_kill=False, env=dict()):
     """Run test program, return True if success else False"""
 
     with open(test.log_filename, "wb") as log:
@@ -553,6 +585,7 @@ async def run_test(test, options):
                          SEASTAR_LDAP_PORT=str(ldap_port),
                          UBSAN_OPTIONS=":".join(filter(None, UBSAN_OPTIONS)),
                          ASAN_OPTIONS=":".join(filter(None, ASAN_OPTIONS)),
+                         **env,
                          ),
                 preexec_fn=os.setsid,
             )
@@ -569,7 +602,10 @@ async def run_test(test, options):
             return True
         except (asyncio.TimeoutError, asyncio.CancelledError) as e:
             if process is not None:
-                process.kill()
+                if gentle_kill:
+                    process.terminate()
+                else:
+                    process.kill()
                 stdout, _ = await process.communicate()
             if isinstance(e, asyncio.TimeoutError):
                 report_error("Test timed out")

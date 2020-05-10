@@ -26,21 +26,21 @@
 #include <seastar/core/shared_future.hh>
 #include <unordered_map>
 #include <functional>
+#include <set>
+#include <any>
 #include "seastarx.hh"
 #include "db/schema_features.hh"
+#include "gms/feature.hh"
 
 namespace db { class config; }
 namespace service { class storage_service; }
 
 namespace gms {
 
-class feature;
-
 struct feature_config {
     bool enable_sstables_mc_format = false;
     bool enable_user_defined_functions = false;
     bool enable_cdc = false;
-    bool enable_lwt = false;
     std::set<sstring> disabled_features;
     feature_config();
 };

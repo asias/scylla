@@ -100,6 +100,14 @@ def test_query_basic_restrictions(dynamodb, filled_test_table):
     print(got_items)
     assert multiset([item for item in items if item['p'] == 'long' and item['c'].startswith('11')]) == multiset(got_items)
 
+def test_query_nonexistent_table(dynamodb):
+    client = dynamodb.meta.client
+    with pytest.raises(ClientError, match="ResourceNotFoundException"):
+        client.query(TableName="i_do_not_exist", KeyConditions={
+            'p' : {'AttributeValueList': ['long'], 'ComparisonOperator': 'EQ'},
+            'c' : {'AttributeValueList': ['11'], 'ComparisonOperator': 'BEGINS_WITH'}
+        })
+
 def test_begins_with(dynamodb, test_table):
     paginator = dynamodb.meta.client.get_paginator('query')
     items = [{'p': 'unorthodox_chars', 'c': sort_key, 'str': 'a'} for sort_key in [u'ÿÿÿ', u'cÿbÿ', u'cÿbÿÿabg'] ]
@@ -451,7 +459,6 @@ def test_query_limit_paging(test_table_sn):
 # return items sorted in reverse order. Combining this with Limit can
 # be used to return the last items instead of the first items of the
 # partition.
-@pytest.mark.xfail(reason="ScanIndexForward not supported yet")
 def test_query_reverse(test_table_sn):
     numbers = [Decimal(i) for i in range(20)]
     # Insert these numbers, in random order, into one partition:
@@ -486,7 +493,6 @@ def test_query_reverse(test_table_sn):
 
 # Test that paging also works properly with reverse order
 # (ScanIndexForward=false), i.e., reverse-order queries can be resumed
-@pytest.mark.xfail(reason="ScanIndexForward not supported yet")
 def test_query_reverse_paging(test_table_sn):
     numbers = [Decimal(i) for i in range(20)]
     # Insert these numbers, in random order, into one partition:
