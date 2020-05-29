@@ -203,15 +203,27 @@ future<> send_mutation_fragments(lw_shared_ptr<send_info> si) {
         }();
 
         auto sink_op = [sink, si, got_error_from_peer] () mutable -> future<> {
-            return do_with(std::move(sink), [si, got_error_from_peer] (rpc::sink<frozen_mutation_fragment, stream_mutation_fragments_cmd>& sink) {
-                return repeat([&sink, si, got_error_from_peer] () mutable {
-                    return si->reader(db::no_timeout).then([&sink, si, s = si->reader.schema(), got_error_from_peer] (mutation_fragment_opt mf) mutable {
-                        if (mf && !(*got_error_from_peer)) {
+            bool partition_opened = false;
+            return do_with(std::move(sink), partition_opened, [si, got_error_from_peer] (rpc::sink<frozen_mutation_fragment, stream_mutation_fragments_cmd>& sink, bool& partition_opened) {
+                return repeat([&sink, &partition_opened, si, got_error_from_peer] () mutable {
+                    return si->reader(db::no_timeout).then([&sink, &partition_opened, si, s = si->reader.schema(), got_error_from_peer] (mutation_fragment_opt mf) mutable {
+                        if (*got_error_from_peer) {
+                            return make_exception_future<stop_iteration>(std::runtime_error("Got status error code from peer"));
+                        }
+                        if (mf) {
+                            if (mf->is_partition_start()) {
+                                partition_opened = true;
+                            } else if (mf->is_end_of_partition()) {
+                                partition_opened = false;
+                            }
                             frozen_mutation_fragment fmf = freeze(*s, *mf);
                             auto size = fmf.representation().size();
                             streaming::get_local_stream_manager().update_progress(si->plan_id, si->id.addr, streaming::progress_info::direction::OUT, size);
                             return sink(fmf, stream_mutation_fragments_cmd::mutation_fragment_data).then([] { return stop_iteration::no; });
                         } else {
+                            if (partition_opened) {
+                                return make_exception_future<stop_iteration>(std::runtime_error("Reached end of stream but partition is still open"));
+                            }
                             return make_ready_future<stop_iteration>(stop_iteration::yes);
                         }
                     });
