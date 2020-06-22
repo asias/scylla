@@ -1203,11 +1203,6 @@ std::optional<shard_id> rmw_operation::shard_for_execute(bool needs_read_before_
 // PutItem, DeleteItem). All these return nothing by default, but can
 // optionally return Attributes if requested via the ReturnValues option.
 static future<executor::request_return_type> rmw_operation_return(rjson::value&& attributes) {
-    // As an optimization, in the simple and common case that nothing is to be
-    // returned, quickly return an empty result:
-    if (attributes.IsNull()) {
-        return make_ready_future<executor::request_return_type>(json_string(""));
-    }
     rjson::value ret = rjson::empty_object();
     if (!attributes.IsNull()) {
         rjson::set(ret, "Attributes", std::move(attributes));
@@ -2774,6 +2769,7 @@ future<executor::request_return_type> executor::batch_get_item(client_state& cli
             [] (std::vector<std::tuple<std::string, std::optional<rjson::value>>> responses) {
         rjson::value response = rjson::empty_object();
         rjson::set(response, "Responses", rjson::empty_object());
+        rjson::set(response, "UnprocessedKeys", rjson::empty_object());
         for (auto& t : responses) {
             if (!response["Responses"].HasMember(std::get<0>(t).c_str())) {
                 rjson::set_with_string_name(response["Responses"], std::get<0>(t), rjson::empty_array());
