@@ -15,11 +15,13 @@
 #include "db/system_keyspace.hh"
 
 #include <seastar/testing/test_case.hh>
+#include <seastar/testing/thread_test_case.hh>
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/cql_assertions.hh"
 #include "schema_builder.hh"
 #include "service/priority_manager.hh"
 #include "test/lib/test_services.hh"
+#include "test/lib/data_model.hh"
 
 using namespace std::literals::chrono_literals;
 
@@ -446,4 +448,161 @@ SEASTAR_TEST_CASE(test_view_update_generator) {
             }
         });
     });
+}
+
+SEASTAR_THREAD_TEST_CASE(test_view_update_generator_buffering) {
+    using partition_size_map = std::map<dht::decorated_key, size_t, dht::ring_position_less_comparator>;
+
+    class consumer_verifier {
+        schema_ptr _schema;
+        const partition_size_map& _partition_rows;
+        std::vector<mutation>& _collected_muts;
+        bool& _failed;
+        std::unique_ptr<row_locker> _rl;
+        std::unique_ptr<row_locker::stats> _rl_stats;
+        clustering_key::less_compare _less_cmp;
+        const size_t _max_rows_soft;
+        const size_t _max_rows_hard;
+        size_t _buffer_rows = 0;
+
+    private:
+        static size_t rows_in_limit(size_t l) {
+            const size_t _100kb = 100 * 1024;
+            // round up
+            return l / _100kb + std::min(size_t(1), l % _100kb);
+        }
+
+        static size_t rows_in_mut(const mutation& m) {
+            return std::distance(m.partition().clustered_rows().begin(), m.partition().clustered_rows().end());
+        }
+
+        void check(mutation mut) {
+            const size_t current_rows = rows_in_mut(mut);
+            const auto total_rows = _partition_rows.at(mut.decorated_key());
+            _buffer_rows += current_rows;
+
+            BOOST_TEST_MESSAGE(fmt::format("consumer_verifier::check(): key={}, rows={}/{}, _buffer={}",
+                    partition_key::with_schema_wrapper(*_schema, mut.key()),
+                    current_rows,
+                    total_rows,
+                    _buffer_rows));
+
+            BOOST_REQUIRE(current_rows);
+            BOOST_REQUIRE(current_rows <= _max_rows_hard);
+            BOOST_REQUIRE(_buffer_rows <= _max_rows_hard);
+
+            // The current partition doesn't have all of its rows yet, verify
+            // that the new mutation contains the next rows for the same
+            // partition
+            if (!_collected_muts.empty() && rows_in_mut(_collected_muts.back()) < _partition_rows.at(_collected_muts.back().decorated_key())) {
+                BOOST_REQUIRE(_collected_muts.back().decorated_key().equal(*mut.schema(), mut.decorated_key()));
+                const auto& previous_ckey = (--_collected_muts.back().partition().clustered_rows().end())->key();
+                const auto& next_ckey = mut.partition().clustered_rows().begin()->key();
+                BOOST_REQUIRE(_less_cmp(previous_ckey, next_ckey));
+                mutation_application_stats stats;
+                _collected_muts.back().partition().apply(*_schema, mut.partition(), *mut.schema(), stats);
+            // The new mutation is a new partition.
+            } else {
+                if (!_collected_muts.empty()) {
+                    BOOST_REQUIRE(!_collected_muts.back().decorated_key().equal(*mut.schema(), mut.decorated_key()));
+                }
+                _collected_muts.push_back(std::move(mut));
+            }
+
+            if (_buffer_rows >= _max_rows_hard) { // buffer flushed on hard limit
+                _buffer_rows = 0;
+                BOOST_TEST_MESSAGE(fmt::format("consumer_verifier::check(): buffer ends on hard limit"));
+            } else if (_buffer_rows >= _max_rows_soft) { // buffer flushed on soft limit
+                _buffer_rows = 0;
+                BOOST_TEST_MESSAGE(fmt::format("consumer_verifier::check(): buffer ends on soft limit"));
+            }
+        }
+
+    public:
+        consumer_verifier(schema_ptr schema, const partition_size_map& partition_rows, std::vector<mutation>& collected_muts, bool& failed)
+            : _schema(std::move(schema))
+            , _partition_rows(partition_rows)
+            , _collected_muts(collected_muts)
+            , _failed(failed)
+            , _rl(std::make_unique<row_locker>(_schema))
+            , _rl_stats(std::make_unique<row_locker::stats>())
+            , _less_cmp(*_schema)
+            , _max_rows_soft(rows_in_limit(db::view::view_updating_consumer::buffer_size_soft_limit))
+            , _max_rows_hard(rows_in_limit(db::view::view_updating_consumer::buffer_size_hard_limit))
+        { }
+
+        future<row_locker::lock_holder> operator()(mutation mut) {
+            try {
+                check(std::move(mut));
+            } catch (...) {
+                BOOST_TEST_MESSAGE(fmt::format("consumer_verifier::operator(): caught unexpected exception {}", std::current_exception()));
+                _failed |= true;
+            }
+            return _rl->lock_pk(_collected_muts.back().decorated_key(), true, db::no_timeout, *_rl_stats);
+        }
+    };
+
+    auto schema = schema_builder("ks", "cf")
+            .with_column("pk", int32_type, column_kind::partition_key)
+            .with_column("ck", int32_type, column_kind::clustering_key)
+            .with_column("v", bytes_type)
+            .build();
+
+    const auto blob_100kb = bytes(100 * 1024, bytes::value_type(0xab));
+    const abort_source as;
+
+    const auto partition_size_sets = std::vector<std::vector<int>>{{12}, {8, 4}, {8, 16}, {22}, {8, 8, 8, 8}, {8, 8, 8, 16, 8}, {8, 20, 16, 16}, {50}, {21}, {21, 2}};
+    const auto max_partition_set_size = boost::max_element(partition_size_sets, [] (const std::vector<int>& a, const std::vector<int>& b) { return a.size() < b.size(); })->size();
+    auto pkeys = boost::copy_range<std::vector<dht::decorated_key>>(boost::irange(size_t{0}, max_partition_set_size) | boost::adaptors::transformed([schema] (int i) {
+        return dht::decorate_key(*schema, partition_key::from_single_value(*schema, int32_type->decompose(data_value(i))));
+    }));
+    boost::sort(pkeys, dht::ring_position_less_comparator(*schema));
+
+    for (auto partition_sizes_100kb : partition_size_sets) {
+        BOOST_TEST_MESSAGE(fmt::format("partition_sizes_100kb={}", partition_sizes_100kb));
+        partition_size_map partition_rows{dht::ring_position_less_comparator(*schema)};
+        std::vector<mutation> muts;
+        auto pk = 0;
+        for (auto partition_size_100kb : partition_sizes_100kb) {
+            auto mut_desc = tests::data_model::mutation_description(pkeys.at(pk++).key().explode(*schema));
+            for (auto ck = 0; ck < partition_size_100kb; ++ck) {
+                mut_desc.add_clustered_cell({int32_type->decompose(data_value(ck))}, "v", tests::data_model::mutation_description::value(blob_100kb));
+            }
+            muts.push_back(mut_desc.build(schema));
+            partition_rows.emplace(muts.back().decorated_key(), partition_size_100kb);
+        }
+
+        boost::sort(muts, [less = dht::ring_position_less_comparator(*schema)] (const mutation& a, const mutation& b) {
+            return less(a.decorated_key(), b.decorated_key());
+        });
+
+        auto mt = make_lw_shared<memtable>(schema);
+        for (const auto& mut : muts) {
+            mt->apply(mut);
+        }
+
+        auto staging_reader = mt->as_data_source().make_reader(
+                schema,
+                no_reader_permit(),
+                query::full_partition_range,
+                schema->full_slice(),
+                service::get_local_streaming_read_priority(),
+                nullptr,
+                streamed_mutation::forwarding::no,
+                ::mutation_reader::forwarding::no);
+
+        std::vector<mutation> collected_muts;
+        bool failed = false;
+
+        staging_reader.consume_in_thread(db::view::view_updating_consumer(schema, as,
+                    consumer_verifier(schema, partition_rows, collected_muts, failed)), db::no_timeout);
+
+        BOOST_REQUIRE(!failed);
+
+        BOOST_REQUIRE_EQUAL(muts.size(), collected_muts.size());
+        for (size_t i = 0; i < muts.size(); ++i) {
+            BOOST_TEST_MESSAGE(fmt::format("compare mutation {}", i));
+            BOOST_REQUIRE_EQUAL(muts[i], collected_muts[i]);
+        }
+    }
 }
