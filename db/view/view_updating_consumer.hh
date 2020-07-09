@@ -32,25 +32,26 @@ public:
 
 private:
     schema_ptr _schema;
-    lw_shared_ptr<table> _table;
-    sstables::shared_sstable _excluded_sstable;
     const seastar::abort_source& _as;
     circular_buffer<mutation> _buffer;
     mutation* _m{nullptr};
     size_t _buffer_size{0};
+    noncopyable_function<future<row_locker::lock_holder>(mutation)> _view_update_pusher;
 
 private:
     void do_flush_buffer();
     void maybe_flush_buffer_mid_partition();
 
 public:
-    view_updating_consumer(schema_ptr schema, database& db, sstables::shared_sstable excluded_sstable, const seastar::abort_source& as)
+    // Push updates with a custom pusher. Mainly for tests.
+    view_updating_consumer(schema_ptr schema, const seastar::abort_source& as, noncopyable_function<future<row_locker::lock_holder>(mutation)> view_update_pusher)
             : _schema(std::move(schema))
-            , _table(db.find_column_family(_schema->id()).shared_from_this())
-            , _excluded_sstable(excluded_sstable)
             , _as(as)
             , _m()
+            , _view_update_pusher(std::move(view_update_pusher))
     { }
+
+    view_updating_consumer(schema_ptr schema, database& db, sstables::shared_sstable excluded_sstable, const seastar::abort_source& as);
 
     view_updating_consumer(view_updating_consumer&&) = default;
 
