@@ -318,7 +318,7 @@ class scylla_cpuinfo:
 
 # When a CLI tool is not installed, use relocatable CLI tool provided by Scylla
 scylla_env = os.environ.copy()
-scylla_env['PATH'] =  '{}:{}'.format(scylla_env['PATH'], scyllabindir())
+scylla_env['PATH'] =  '{}:{}'.format(scyllabindir(), scylla_env['PATH'])
 
 def run(cmd, shell=False, silent=False, exception=True):
     stdout = subprocess.DEVNULL if silent else None
@@ -430,6 +430,19 @@ def dist_ver():
     return platform.dist()[1]
 
 
+SYSTEM_PARTITION_UUIDS = [
+        '21686148-6449-6e6f-744e-656564454649', # BIOS boot partition
+        'c12a7328-f81f-11d2-ba4b-00a0c93ec93b', # EFI system partition
+        '024dee41-33e7-11d3-9d69-0008c781f39f'  # MBR partition scheme
+]
+
+def get_partition_uuid(dev):
+    return out(f'lsblk -n -oPARTTYPE {dev}')
+
+def is_system_partition(dev):
+    uuid = get_partition_uuid(dev)
+    return (uuid in SYSTEM_PARTITION_UUIDS)
+
 def is_unused_disk(dev):
     # dev is not in /sys/class/block/, like /dev/nvme[0-9]+
     if not os.path.isdir('/sys/class/block/{dev}'.format(dev=dev.replace('/dev/', ''))):
@@ -437,7 +450,8 @@ def is_unused_disk(dev):
     try:
         fd = os.open(dev, os.O_EXCL)
         os.close(fd)
-        return True
+        # dev is not reserved for system
+        return not is_system_partition(dev)
     except OSError:
         return False
 
