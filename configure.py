@@ -1287,9 +1287,9 @@ def query_seastar_flags(pc_file, link_static_cxx=False):
     return cflags, libs
 
 for mode in build_modes:
-    seastar_cflags, seastar_libs = query_seastar_flags(pc[mode], link_static_cxx=args.staticcxx)
-    modes[mode]['seastar_cflags'] = seastar_cflags
-    modes[mode]['seastar_libs'] = seastar_libs
+    seastar_pc_cflags, seastar_pc_libs = query_seastar_flags(pc[mode], link_static_cxx=args.staticcxx)
+    modes[mode]['seastar_cflags'] = seastar_pc_cflags
+    modes[mode]['seastar_libs'] = seastar_pc_libs
 
 # We need to use experimental features of the zstd library (to use our own allocators for the (de)compression context),
 # which are available only when the library is linked statically.
@@ -1309,6 +1309,46 @@ def configure_zstd(build_dir, mode):
     print(zstd_cmd)
     os.makedirs(zstd_build_dir, exist_ok=True)
     subprocess.check_call(zstd_cmd, shell=False, cwd=zstd_build_dir)
+
+def configure_abseil(build_dir, mode):
+    abseil_build_dir = os.path.join(build_dir, mode, 'abseil')
+
+    abseil_cflags = seastar_cflags + ' ' + modes[mode]['cxx_ld_flags']
+    cmake_mode = MODE_TO_CMAKE_BUILD_TYPE[mode]
+    abseil_cmake_args = [
+        '-DCMAKE_BUILD_TYPE={}'.format(cmake_mode),
+        '-DCMAKE_INSTALL_PREFIX={}'.format(build_dir + '/inst'), # just to avoid a warning from absl
+        '-DCMAKE_C_COMPILER={}'.format(args.cc),
+        '-DCMAKE_CXX_COMPILER={}'.format(args.cxx),
+        '-DCMAKE_CXX_FLAGS_{}={}'.format(cmake_mode.upper(), abseil_cflags),
+    ]
+
+    abseil_cmd = ['cmake', '-G', 'Ninja', os.path.relpath('abseil', abseil_build_dir)] + abseil_cmake_args
+
+    os.makedirs(abseil_build_dir, exist_ok=True)
+    subprocess.check_call(abseil_cmd, shell=False, cwd=abseil_build_dir)
+
+abseil_libs = ['absl/' + lib for lib in [
+    'container/libabsl_hashtablez_sampler.a',
+    'container/libabsl_raw_hash_set.a',
+    'synchronization/libabsl_synchronization.a',
+    'synchronization/libabsl_graphcycles_internal.a',
+    'debugging/libabsl_stacktrace.a',
+    'debugging/libabsl_symbolize.a',
+    'debugging/libabsl_debugging_internal.a',
+    'debugging/libabsl_demangle_internal.a',
+    'time/libabsl_time.a',
+    'time/libabsl_time_zone.a',
+    'numeric/libabsl_int128.a',
+    'hash/libabsl_city.a',
+    'hash/libabsl_hash.a',
+    'base/libabsl_malloc_internal.a',
+    'base/libabsl_spinlock_wait.a',
+    'base/libabsl_base.a',
+    'base/libabsl_dynamic_annotations.a',
+    'base/libabsl_raw_logging_internal.a',
+    'base/libabsl_exponential_biased.a',
+    'base/libabsl_throw_delegate.a']]
 
 args.user_cflags += " " + pkg_config('jsoncpp', '--cflags')
 args.user_cflags += ' -march=' + args.target
@@ -1338,6 +1378,7 @@ if any(filter(thrift_version.startswith, thrift_boost_versions)):
 for pkg in pkgs:
     args.user_cflags += ' ' + pkg_config(pkg, '--cflags')
     libs += ' ' + pkg_config(pkg, '--libs')
+args.user_cflags += '-I abseil'
 user_cflags = args.user_cflags + ' -fvisibility=hidden'
 user_ldflags = args.user_ldflags + ' -fvisibility=hidden'
 if args.staticcxx:
@@ -1395,6 +1436,9 @@ else:
 
 for mode in build_modes:
     configure_zstd(outdir, mode)
+
+for mode in build_modes:
+    configure_abseil(outdir, mode)
 
 # configure.py may run automatically from an already-existing build.ninja.
 # If the user interrupts configure.py in the middle, we need build.ninja
@@ -1530,6 +1574,8 @@ with open(buildfile_tmp, 'w') as f:
                 objs.extend(['$builddir/' + mode + '/' + artifact for artifact in [
                     'libdeflate/libdeflate.a',
                     'zstd/lib/libzstd.a',
+                ] + [
+                    'abseil/' + x for x in abseil_libs
                 ]])
                 objs.append('$builddir/' + mode + '/gen/utils/gz/crc_combine_table.o')
                 if binary in tests:
@@ -1670,6 +1716,12 @@ with open(buildfile_tmp, 'w') as f:
         f.write('  pool = submodule_pool\n')
         f.write('  subdir = build/{mode}/zstd\n'.format(**locals()))
         f.write('  target = libzstd.a\n'.format(**locals()))
+
+        for lib in abseil_libs:
+            f.write('build build/{mode}/abseil/{lib}: ninja\n'.format(**locals()))
+            f.write('  pool = submodule_pool\n')
+            f.write('  subdir = build/{mode}/abseil\n'.format(**locals()))
+            f.write('  target = {lib}\n'.format(**locals()))
 
     mode = 'dev' if 'dev' in modes else modes[0]
     f.write('build checkheaders: phony || {}\n'.format(' '.join(['$builddir/{}/{}.o'.format(mode, hh) for hh in headers])))

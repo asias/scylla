@@ -510,7 +510,7 @@ public:
             _segment_manager->totals.total_size_on_disk -= size_on_disk();
             _segment_manager->totals.total_size -= (size_on_disk() + _buffer.size_bytes());
             _segment_manager->add_file_to_delete(_file_name, _desc);
-        } else {
+        } else if (_segment_manager->cfg.warn_about_segments_left_on_disk_after_shutdown) {
             clogger.warn("Segment {} is dirty and is left on disk.", *this);
         }
     }
@@ -1283,7 +1283,7 @@ future<db::commitlog::segment_manager::sseg_ptr> db::commitlog::segment_manager:
         auto fut = open_file_dma(filename, flags, opt);
         if (cfg.extensions && !cfg.extensions->commitlog_file_extensions().empty()) {
             for (auto * ext : cfg.extensions->commitlog_file_extensions()) {
-                fut = fut.then([ext, filename, flags](file f) {
+                fut = close_on_failure(std::move(fut), [ext, filename, flags](file f) {
                    return ext->wrap_file(filename, f, flags).then([f](file nf) mutable {
                        return nf ? nf : std::move(f);
                    });
