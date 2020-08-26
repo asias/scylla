@@ -422,6 +422,7 @@ class LdapTest(BoostTest):
         process = subprocess.Popen(['slapd', '-F', os.path.abspath(instance_path), '-h', SLAPD_URLS, '-d', '0'])
         def finalize():
             process.terminate()
+            process.wait() # Wait for slapd to remove slapd.pid, so it doesn't race with rmtree below.
             shutil.rmtree(instance_path)
             subprocess.check_output(['toxiproxy-cli', 'd', proxy_name])
         if not try_something_backoff(can_connect_to_slapd):
