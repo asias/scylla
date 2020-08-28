@@ -613,9 +613,6 @@ bool single_column_restriction::EQ::is_satisfied_by(const schema& schema,
         const row& cells,
         const query_options& options,
         gc_clock::time_point now) const {
-    if (_column_def.type->is_counter()) {
-        fail(unimplemented::cause::COUNTERS);
-    }
     auto operand = value(options);
     if (operand) {
         auto cell_value = get_value(schema, key, ckey, cells, now);
@@ -630,9 +627,6 @@ bool single_column_restriction::EQ::is_satisfied_by(const schema& schema,
 }
 
 bool single_column_restriction::EQ::is_satisfied_by(bytes_view data, const query_options& options) const {
-    if (_column_def.type->is_counter()) {
-        fail(unimplemented::cause::COUNTERS);
-    }
     auto operand = value(options);
     return operand && _column_def.type->compare(*operand, data) == 0;
 }
@@ -643,9 +637,6 @@ bool single_column_restriction::IN::is_satisfied_by(const schema& schema,
         const row& cells,
         const query_options& options,
         gc_clock::time_point now) const {
-    if (_column_def.type->is_counter()) {
-        fail(unimplemented::cause::COUNTERS);
-    }
     auto cell_value = get_value(schema, key, ckey, cells, now);
     if (!cell_value) {
         return false;
@@ -659,9 +650,6 @@ bool single_column_restriction::IN::is_satisfied_by(const schema& schema,
 }
 
 bool single_column_restriction::IN::is_satisfied_by(bytes_view data, const query_options& options) const {
-    if (_column_def.type->is_counter()) {
-        fail(unimplemented::cause::COUNTERS);
-    }
     auto operands = values(options);
     return boost::algorithm::any_of(operands, [this, &data] (const bytes_opt& operand) {
         return operand && _column_def.type->compare(*operand, data) == 0;
@@ -711,9 +699,6 @@ bool single_column_restriction::slice::is_satisfied_by(const schema& schema,
 }
 
 bool single_column_restriction::slice::is_satisfied_by(bytes_view data, const query_options& options) const {
-    if (_column_def.type->is_counter()) {
-        fail(unimplemented::cause::COUNTERS);
-    }
     return contains_without_wraparound(to_range(_slice, options),
             data, _column_def.type->underlying_type()->as_tri_comparator());
 }
@@ -724,9 +709,6 @@ bool single_column_restriction::contains::is_satisfied_by(const schema& schema,
         const row& cells,
         const query_options& options,
         gc_clock::time_point now) const {
-    if (_column_def.type->is_counter()) {
-        fail(unimplemented::cause::COUNTERS);
-    }
     if (!_column_def.type->is_collection()) {
         return false;
     }

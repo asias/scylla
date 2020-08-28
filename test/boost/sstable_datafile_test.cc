@@ -5662,10 +5662,6 @@ SEASTAR_TEST_CASE(incremental_compaction_data_resurrection_test) {
     });
 }
 
-bool needs_cleanup(const sstables::shared_sstable& sst,
-                   const dht::token_range_vector& sorted_owned_ranges,
-                   schema_ptr s);
-
 SEASTAR_TEST_CASE(sstable_needs_cleanup_test) {
     test_env env;
     auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
