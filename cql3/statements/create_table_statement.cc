@@ -193,6 +193,7 @@ std::unique_ptr<prepared_statement> create_table_statement::raw_statement::prepa
     }
 
     _properties.validate(db, _properties.properties()->make_schema_extensions(db.extensions()));
+    const bool has_default_ttl = _properties.properties()->get_default_time_to_live() > 0;
 
     auto stmt = ::make_shared<create_table_statement>(_cf_name, _properties.properties(), _if_not_exists, _static_columns, _properties.properties()->get_id());
 
@@ -203,6 +204,11 @@ std::unique_ptr<prepared_statement> create_table_statement::raw_statement::prepa
         if (pt.is_counter() && !db.features().cluster_supports_counters()) {
             throw exceptions::invalid_request_exception("Counter support is not enabled");
         }
+
+        if (has_default_ttl && pt.is_counter()) {
+            throw exceptions::invalid_request_exception("Cannot set default_time_to_live on a table with counters");
+        }
+
         if (pt.get_type()->is_multi_cell()) {
             if (pt.get_type()->is_user_type()) {
                 // check for multi-cell types (non-frozen UDTs or collections) inside a non-frozen UDT
