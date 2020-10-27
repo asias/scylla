@@ -91,6 +91,7 @@ adjust_bin() {
 	"$root/$prefix/libexec/$bin"
     cat > "$root/$prefix/bin/$bin" <<EOF
 #!/bin/bash -e
+[[ -z "\$LD_PRELOAD" ]] || { echo "\$0: not compatible with LD_PRELOAD" >&2; exit 110; }
 export GNUTLS_SYSTEM_PRIORITY_FILE="\${GNUTLS_SYSTEM_PRIORITY_FILE-$prefix/libreloc/gnutls.config}"
 export LD_LIBRARY_PATH="$prefix/libreloc"
 exec -a "\$0" "$prefix/libexec/$bin" "\$@"
@@ -115,6 +116,7 @@ relocate_python3() {
     cp "$script" "$relocateddir"
     cat > "$install"<<EOF
 #!/usr/bin/env bash
+[[ -z "\$LD_PRELOAD" ]] || { echo "\$0: not compatible with LD_PRELOAD" >&2; exit 110; }
 export LC_ALL=en_US.UTF-8
 x="\$(readlink -f "\$0")"
 b="\$(basename "\$x")"
