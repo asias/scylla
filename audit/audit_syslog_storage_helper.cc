@@ -15,7 +15,11 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <syslog.h>
+#if __has_include(<fmt/time.h>)
 #include <fmt/time.h>
+#else
+#include <fmt/chrono.h>
+#endif
 #include "utils/class_registrator.hh"
 
 namespace audit {
