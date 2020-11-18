@@ -44,7 +44,6 @@
 #include <limits>
 #include <cstddef>
 #include "schema_fwd.hh"
-#include "db/view/view.hh"
 #include "db/schema_features.hh"
 #include "gms/feature.hh"
 #include "timestamp.hh"
@@ -993,9 +992,8 @@ public:
         return *_config.sstables_manager;
     }
 
-    // Reader's schema must be the same as the base schema of each of the views.
     future<> populate_views(
-            std::vector<db::view::view_and_base>,
+            std::vector<view_ptr>,
             dht::token base_token,
             flat_mutation_reader&&);
 
@@ -1011,7 +1009,7 @@ private:
     future<row_locker::lock_holder> do_push_view_replica_updates(const schema_ptr& s, mutation&& m, db::timeout_clock::time_point timeout, mutation_source&& source, const io_priority_class& io_priority) const;
     std::vector<view_ptr> affected_views(const schema_ptr& base, const mutation& update) const;
     future<> generate_and_propagate_view_updates(const schema_ptr& base,
-            std::vector<db::view::view_and_base>&& views,
+            std::vector<view_ptr>&& views,
             mutation&& m,
             flat_mutation_reader_opt existings) const;
 
