@@ -342,5 +342,9 @@ elif ! $packaging; then
     mv /tmp/scylla.yaml /etc/scylla/scylla.yaml
 
 
+    for file in dist/common/sysctl.d/*.conf; do
+        bn=$(basename "$file")
+        sysctl -p "$rusr"/lib/sysctl.d/"$bn"
+    done
     $rprefix/scripts/scylla_post_install.sh
 fi
