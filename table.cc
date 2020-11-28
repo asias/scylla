@@ -416,7 +416,8 @@ table::make_reader(schema_ptr s,
     if (cache_enabled() && !slice.options.contains(query::partition_slice::option::bypass_cache)) {
         readers.emplace_back(_cache.make_reader(s, permit, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
     } else {
-        readers.emplace_back(make_sstable_reader(s, permit, _sstables, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
+        readers.emplace_back(make_sstable_reader(s, permit, _sstables, range, slice, pc, trace_state, fwd, fwd_mr));
+        readers.emplace_back(make_sstable_reader(s, permit, _repair_sstables, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
     }
 
     auto comb_reader = make_combined_reader(s, std::move(permit), std::move(readers), fwd, fwd_mr);
@@ -447,10 +448,11 @@ table::make_streaming_reader(schema_ptr s,
     auto source = mutation_source([this] (schema_ptr s, reader_permit permit, const dht::partition_range& range, const query::partition_slice& slice,
                                       const io_priority_class& pc, tracing::trace_state_ptr trace_state, streamed_mutation::forwarding fwd, mutation_reader::forwarding fwd_mr) {
         std::vector<flat_mutation_reader> readers;
-        readers.reserve(_memtables->size() + 1);
+        readers.reserve(_memtables->size() + 2);
         for (auto&& mt : *_memtables) {
             readers.emplace_back(mt->make_flat_reader(s, permit, range, slice, pc, trace_state, fwd, fwd_mr));
         }
+        readers.emplace_back(make_sstable_reader(s, permit, _repair_sstables, range, slice, pc, trace_state, fwd, fwd_mr));
         readers.emplace_back(make_sstable_reader(s, permit, _sstables, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
         return make_combined_reader(s, std::move(permit), std::move(readers), fwd, fwd_mr);
     });
@@ -466,10 +468,11 @@ flat_mutation_reader table::make_streaming_reader(schema_ptr schema, const dht::
     const auto fwd = streamed_mutation::forwarding::no;
 
     std::vector<flat_mutation_reader> readers;
-    readers.reserve(_memtables->size() + 1);
+    readers.reserve(_memtables->size() + 2);
     for (auto&& mt : *_memtables) {
         readers.emplace_back(mt->make_flat_reader(schema, permit, range, slice, pc, trace_state, fwd, fwd_mr));
     }
+    readers.emplace_back(make_sstable_reader(schema, permit, _repair_sstables, range, slice, pc, trace_state, fwd, fwd_mr));
     readers.emplace_back(make_sstable_reader(schema, permit, _sstables, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
     return make_combined_reader(std::move(schema), std::move(permit), std::move(readers), fwd, fwd_mr);
 }
@@ -616,12 +619,35 @@ void table::add_sstable(sstables::shared_sstable sstable) {
 
 future<>
 table::add_sstable_and_update_cache(sstables::shared_sstable sst) {
+    if(_is_bootstrap_or_replace) {
+        return add_sstable_for_repair(std::move(sst));
+    }
     return get_row_cache().invalidate([this, sst] () noexcept {
         // FIXME: this is not really noexcept, but we need to provide strong exception guarantees.
         // atomically load all opened sstables into column family.
         add_sstable(sst);
         trigger_compaction();
     }, dht::partition_range::make({sst->get_first_decorated_key(), true}, {sst->get_last_decorated_key(), true}));
+}
+
+lw_shared_ptr<sstables::sstable_set> table::make_repair_sstable_set() const {
+    // FIXME: twcs may want to use its own custom set as the data may be segregated by timestamp
+    return make_lw_shared<sstables::sstable_set>(
+        sstables::make_partitioned_sstable_set(_schema, make_lw_shared<sstable_list>(sstable_list{}), false));
+}
+
+future<>
+table::add_sstable_for_repair(sstables::shared_sstable sst) {
+    // allow in-progress reads to continue using old list
+    auto new_sstables = make_lw_shared<sstables::sstable_set>(*_repair_sstables);
+    new_sstables->insert(sst);
+    if (sst->requires_view_building()) {
+        // don't compact new sstables until view builder is done with them
+        _sstables_staging.emplace(sst->generation(), sst);
+    }
+    _repair_sstables = std::move(new_sstables);
+    update_stats_for_new_sstable(sst->bytes_on_disk());
+    return make_ready_future<>();
 }
 
 future<>
@@ -838,6 +864,7 @@ table::stop() {
                     return _sstable_deletion_gate.close().then([this] {
                         return get_row_cache().invalidate([this] {
                             _sstables = _compaction_strategy.make_sstable_set(_schema);
+                            _repair_sstables = make_repair_sstable_set();
                             _sstables_staging.clear();
                         }).then([this] {
                             _cache.refresh_snapshot();
@@ -908,6 +935,7 @@ void table::rebuild_statistics() {
     _stats.live_disk_space_used = 0;
     _stats.live_sstable_count = 0;
 
+    // FIXME: take into account repair_sstables
     for (auto&& tab : boost::range::join(_sstables_compacted_but_not_deleted,
                     // this might seem dangerous, but "move" here just avoids constness,
                     // making the two ranges compatible when compiling with boost 1.55.
@@ -1068,6 +1096,10 @@ void table::do_trigger_compaction() {
     // But only submit if we're not locked out
     if (!_compaction_disabled) {
         _compaction_manager.submit(this);
+        // submit off-strategy compaction only after we're done with repair-based maintenance operation
+        if (!_is_bootstrap_or_replace && _repair_sstables->all()->size()) {
+            _compaction_manager.submit_off_strategy(this);
+        }
     }
 }
 
@@ -1088,6 +1120,10 @@ void table::set_compaction_strategy(sstables::compaction_strategy_type strategy)
         add_sstable_to_backlog_tracker(new_cs.get_backlog_tracker(), s);
         new_sstables.insert(s);
     }
+    auto new_repair_sstables = make_repair_sstable_set();
+    for (auto&& s : *_repair_sstables->all()) {
+        new_repair_sstables->insert(s);
+    }
 
     if (!move_read_charges) {
         _compaction_manager.stop_tracking_ongoing_compactions(this);
@@ -1096,13 +1132,16 @@ void table::set_compaction_strategy(sstables::compaction_strategy_type strategy)
     // now exception safe:
     _compaction_strategy = std::move(new_cs);
     _sstables = std::move(new_sstables);
+    _repair_sstables = std::move(new_repair_sstables);
 }
 
 size_t table::sstables_count() const {
+    // FIXME: take into account _repair_sstables
     return _sstables->all()->size();
 }
 
 std::vector<uint64_t> table::sstable_count_per_level() const {
+    // FIXME: take into account _repair_sstables
     std::vector<uint64_t> count_per_level;
     for (auto&& sst : *_sstables->all()) {
         auto level = sst->get_sstable_level();
@@ -1154,6 +1193,7 @@ lw_shared_ptr<const sstable_list> table::get_sstables() const {
 }
 
 std::vector<sstables::shared_sstable> table::select_sstables(const dht::partition_range& range) const {
+    // FIXME: account _repair_sstables
     return _sstables->select(range);
 }
 
@@ -1178,6 +1218,9 @@ lw_shared_ptr<const sstable_list> table::get_sstables_including_compacted_undele
     auto ret = make_lw_shared<sstable_list>(*_sstables->all());
     for (auto&& s : _sstables_compacted_but_not_deleted) {
         ret->insert(s);
+    }
+    for (auto& sst : *_repair_sstables->all()) {
+        ret->insert(sst);
     }
     return ret;
 }
@@ -1212,6 +1255,7 @@ table::table(schema_ptr schema, config config, db::commitlog* cl, compaction_man
     , _memtables(_config.enable_disk_writes ? make_memtable_list() : make_memory_only_memtable_list())
     , _compaction_strategy(make_compaction_strategy(_schema->compaction_strategy(), _schema->compaction_strategy_options()))
     , _sstables(make_lw_shared<sstables::sstable_set>(_compaction_strategy.make_sstable_set(_schema)))
+    , _repair_sstables(make_repair_sstable_set())
     , _cache(_schema, sstables_as_snapshot_source(), row_cache_tracker, is_continuous::yes)
     , _commitlog(cl)
     , _durable_writes(true)
@@ -1248,7 +1292,8 @@ snapshot_source
 table::sstables_as_snapshot_source() {
     return snapshot_source([this] () {
         auto sst_set = _sstables;
-        return mutation_source([this, sst_set] (schema_ptr s,
+        auto repair_sst_set = _repair_sstables;
+        return mutation_source([this, sst_set, repair_sst_set] (schema_ptr s,
                 reader_permit permit,
                 const dht::partition_range& r,
                 const query::partition_slice& slice,
@@ -1256,8 +1301,15 @@ table::sstables_as_snapshot_source() {
                 tracing::trace_state_ptr trace_state,
                 streamed_mutation::forwarding fwd,
                 mutation_reader::forwarding fwd_mr) {
-            return make_sstable_reader(std::move(s), std::move(permit), sst_set, r, slice, pc, std::move(trace_state), fwd, fwd_mr);
-        }, [this, sst_set] {
+            std::vector<flat_mutation_reader> readers;
+            readers.emplace_back(make_sstable_reader(s, permit, sst_set, r, slice, pc, trace_state, fwd, fwd_mr));
+            readers.emplace_back(make_sstable_reader(s, permit, repair_sst_set, r, slice, pc, trace_state, fwd, fwd_mr));
+            return make_combined_reader(s, std::move(permit), std::move(readers), fwd, fwd_mr);
+        }, [this, sst_set, repair_sst_set] {
+            // FIXME: found a way to combine both sets without this copy below
+            for (auto& sst : *repair_sst_set->all()) {
+                sst_set->insert(sst);
+            }
             return make_partition_presence_checker(sst_set);
         });
     });
@@ -1370,6 +1422,7 @@ future<> table::write_schema_as_cql(database& db, sstring dir) const {
 }
 
 future<> table::snapshot(database& db, sstring name) {
+    // FIXME: take into account _repair_sstables
     return flush().then([this, &db, name = std::move(name)]() {
        return with_semaphore(_sstable_deletion_sem, 1, [this, &db, name = std::move(name)]() {
         // If the SSTables are shared, link this sstable to the snapshot directory only by one of the shards that own it.
@@ -1532,6 +1585,8 @@ future<db::replay_position> table::discard_sstables(db_clock::time_point truncat
             auto gc_trunc = to_gc_clock(truncated_at);
 
             auto pruned = make_lw_shared<sstables::sstable_set>(cf._compaction_strategy.make_sstable_set(cf._schema));
+
+            // FIXME: take into account _repair_sstables
 
             for (auto& p : *cf._sstables->all()) {
                 if (p->max_data_age() <= gc_trunc) {
@@ -2045,7 +2100,7 @@ table::make_reader_excluding_sstables(schema_ptr s,
         streamed_mutation::forwarding fwd,
         mutation_reader::forwarding fwd_mr) const {
     std::vector<flat_mutation_reader> readers;
-    readers.reserve(_memtables->size() + 1);
+    readers.reserve(_memtables->size() + 2);
 
     for (auto&& mt : *_memtables) {
         readers.emplace_back(mt->make_flat_reader(s, permit, range, slice, pc, trace_state, fwd, fwd_mr));
@@ -2055,8 +2110,13 @@ table::make_reader_excluding_sstables(schema_ptr s,
     for (auto& sst : excluded) {
         effective_sstables->erase(sst);
     }
+    auto effective_repair_sstables = ::make_lw_shared<sstables::sstable_set>(*_repair_sstables);
+    for (auto& sst : excluded) {
+        effective_sstables->erase(sst);
+    }
 
-    readers.emplace_back(make_sstable_reader(s, permit, std::move(effective_sstables), range, slice, pc, std::move(trace_state), fwd, fwd_mr));
+    readers.emplace_back(make_sstable_reader(s, permit, std::move(effective_sstables), range, slice, pc, trace_state, fwd, fwd_mr));
+    readers.emplace_back(make_sstable_reader(s, permit, std::move(effective_repair_sstables), range, slice, pc, std::move(trace_state), fwd, fwd_mr));
     return make_combined_reader(s, std::move(permit), std::move(readers), fwd, fwd_mr);
 }
 
@@ -2068,7 +2128,7 @@ future<> table::move_sstables_from_staging(std::vector<sstables::shared_sstable>
                 return sst->move_to_new_dir(dir(), sst->generation(), false).then_wrapped([this, sst, &dirs_to_sync] (future<> f) {
                     if (!f.failed()) {
                         _sstables_staging.erase(sst->generation());
-                        add_sstable_to_backlog_tracker(_compaction_strategy.get_backlog_tracker(), sst);
+                        // staging sstables belong to _repair_sstables, so don't add them to backlog tracker.
                         return make_ready_future<>();
                     } else {
                         auto ep = f.get_exception();
