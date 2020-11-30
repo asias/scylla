@@ -311,6 +311,7 @@ tracker::tracker(size_t nr_shards, size_t max_repair_memory)
     : _shutdown(false)
     , _repairs(nr_shards) {
     auto nr = std::max(size_t(1), size_t(max_repair_memory / max_repair_memory_per_range()));
+    nr = 1;
     rlogger.info("Setting max_repair_memory={}, max_repair_memory_per_range={}, max_repair_ranges_in_parallel={}",
         max_repair_memory, max_repair_memory_per_range(), nr);
     _range_parallelism_semaphores.reserve(nr_shards);
