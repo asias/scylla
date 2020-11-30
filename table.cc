@@ -452,7 +452,7 @@ table::make_streaming_reader(schema_ptr s,
         for (auto&& mt : *_memtables) {
             readers.emplace_back(mt->make_flat_reader(s, permit, range, slice, pc, trace_state, fwd, fwd_mr));
         }
-        readers.emplace_back(make_sstable_reader(s, permit, _repair_sstables, range, slice, pc, trace_state, fwd, fwd_mr));
+        // readers.emplace_back(make_sstable_reader(s, permit, _repair_sstables, range, slice, pc, trace_state, fwd, fwd_mr));
         readers.emplace_back(make_sstable_reader(s, permit, _sstables, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
         return make_combined_reader(s, std::move(permit), std::move(readers), fwd, fwd_mr);
     });
@@ -472,7 +472,7 @@ flat_mutation_reader table::make_streaming_reader(schema_ptr schema, const dht::
     for (auto&& mt : *_memtables) {
         readers.emplace_back(mt->make_flat_reader(schema, permit, range, slice, pc, trace_state, fwd, fwd_mr));
     }
-    readers.emplace_back(make_sstable_reader(schema, permit, _repair_sstables, range, slice, pc, trace_state, fwd, fwd_mr));
+    // readers.emplace_back(make_sstable_reader(schema, permit, _repair_sstables, range, slice, pc, trace_state, fwd, fwd_mr));
     readers.emplace_back(make_sstable_reader(schema, permit, _sstables, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
     return make_combined_reader(std::move(schema), std::move(permit), std::move(readers), fwd, fwd_mr);
 }
