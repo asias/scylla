@@ -983,6 +983,9 @@ private:
     friend class join_node_rpc_handshaker;
     friend class node_ops::node_ops_virtual_task;
     friend class node_ops::task_manager_module;
+
+public:
+    future<> generate_data_for_table(sstring ks_name, sstring cf_name, uint64_t start_key, uint64_t end_key, size_t column_size, double drop_ratio);
 };
 
 }
