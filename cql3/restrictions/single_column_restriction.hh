@@ -42,6 +42,8 @@
 #include "exceptions/exceptions.hh"
 #include "keys.hh"
 #include "utils/like_matcher.hh"
+#include "cql3/statements/request_validations.hh"
+#include "cql3/constants.hh"
 
 namespace cql3 {
 
@@ -258,10 +260,13 @@ public:
     }
 
     virtual std::vector<bytes_opt> values_raw(const query_options& options) const override {
-        auto&& lval = dynamic_pointer_cast<multi_item_terminal>(_marker->bind(options));
-        if (!lval) {
-            throw exceptions::invalid_request_exception("Invalid null value for IN restriction");
+        const auto bound = _marker->bind(options);
+        if (bound == constants::UNSET_VALUE) {
+            throw statements::request_validations::invalid_request(
+                    "Invalid unset value for column %s", _column_def.name_as_text());
         }
+        auto&& lval = dynamic_pointer_cast<multi_item_terminal>(bound);
+        statements::request_validations::check_not_null(lval, "Invalid null value for IN restriction");
         return lval->get_elements();
     }
 

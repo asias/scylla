@@ -293,6 +293,12 @@ maps::setter_by_key::execute(mutation& m, const clustering_key_prefix& prefix, c
     assert(column.type->is_multi_cell()); // "Attempted to set a value for a single key on a frozen map"m
     auto key = _k->bind_and_get(params._options);
     auto value = _t->bind_and_get(params._options);
+    if (value.is_unset_value()) {
+        return;
+    }
+    if (key.is_unset_value()) {
+        throw invalid_request_exception("Invalid unset map key");
+    }
     if (!key) {
         throw invalid_request_exception("Invalid null map key");
     }
@@ -346,11 +352,11 @@ void
 maps::discarder_by_key::execute(mutation& m, const clustering_key_prefix& prefix, const update_parameters& params) {
     assert(column.type->is_multi_cell()); // "Attempted to delete a single key in a frozen map";
     auto&& key = _t->bind(params._options);
-    if (!key) {
-        throw exceptions::invalid_request_exception("Invalid null map key");
-    }
     if (key == constants::UNSET_VALUE) {
         throw exceptions::invalid_request_exception("Invalid unset map key");
+    }
+    if (!key) {
+        throw exceptions::invalid_request_exception("Invalid null map key");
     }
     collection_mutation_description mut;
     mut.cells.emplace_back(*key->get(params._options), params.make_dead_cell());
