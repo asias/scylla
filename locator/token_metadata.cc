@@ -31,6 +31,7 @@
 #include <boost/icl/interval.hpp>
 #include <boost/icl/interval_map.hpp>
 #include <seastar/core/coroutine.hh>
+#include <boost/range/adaptors.hpp>
 
 namespace locator {
 
@@ -535,15 +536,14 @@ public:
 
 #endif
     std::vector<inet_address> get_all_endpoints() const {
-        std::vector<inet_address> tmp;
-        std::transform(_endpoint_to_host_id_map.begin(), _endpoint_to_host_id_map.end(), std::back_inserter(tmp), [](const auto& p) {
-           return p.first;
-        });
-        return tmp;
+        std::unordered_set<inet_address> tmp;
+        boost::copy_range<std::unordered_set<gms::inet_address>>(_token_to_endpoint_map | boost::adaptors::map_values);
+        std::vector<inet_address> ret(tmp.begin(), tmp.end());
+        return ret;
     }
 
     size_t get_all_endpoints_count() const {
-        return _endpoint_to_host_id_map.size();
+        return count_normal_token_owners();
     }
 
     /* Returns the number of different endpoints that own tokens in the ring.
