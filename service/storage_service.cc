@@ -693,19 +693,21 @@ void storage_service::bootstrap() {
 
         // Update pending ranges now, so we correctly count ourselves as a pending replica
         // when inserting the new CDC generation.
-        mutate_token_metadata([this] (mutable_token_metadata_ptr tmptr) {
-            auto endpoint = get_broadcast_address();
-            tmptr->add_bootstrap_tokens(_bootstrap_tokens, endpoint);
-            return update_pending_ranges(std::move(tmptr), format("bootstrapping node {}", endpoint));
-        }).get();
+        // mutate_token_metadata([this] (mutable_token_metadata_ptr tmptr) {
+        //     auto endpoint = get_broadcast_address();
+        //     tmptr->add_bootstrap_tokens(_bootstrap_tokens, endpoint);
+        //     return update_pending_ranges(std::move(tmptr), format("bootstrapping node {}", endpoint));
+        // }).get();
 
         // After we pick a generation timestamp, we start gossiping it, and we stick with it.
         // We don't do any other generation switches (unless we crash before complecting bootstrap).
         assert(!_cdc_gen_id);
 
+        slogger.info("cdc1");
         _cdc_gen_id = cdc::make_new_cdc_generation(db().local().get_config(),
                 _bootstrap_tokens, get_token_metadata_ptr(), _gossiper,
                 _sys_dist_ks.local(), get_ring_delay(), !_for_testing && !is_first_node()).get0();
+        slogger.info("cdc2");
 
         _gossiper.add_local_application_state({
             // Order is important: both the CDC streams timestamp and tokens must be known when a node handles our status.

@@ -1593,11 +1593,12 @@ future<> bootstrap_with_repair(seastar::sharded<database>& db, seastar::sharded<
             //Collects the source that will have its range moved to the new node
             std::unordered_map<dht::token_range, repair_neighbors> range_sources;
 
-            rlogger.info("bootstrap_with_repair: started with keyspace={}, nr_ranges={}", keyspace_name, desired_ranges.size());
+            rlogger.info("bootstrap_with_repair: started with keyspace={}, nr_ranges={}, range_addresses={}", keyspace_name, desired_ranges.size(), range_addresses);
             for (auto& desired_range : desired_ranges) {
                 for (auto& x : range_addresses) {
                     const range<dht::token>& src_range = x.first;
                     seastar::thread::maybe_yield();
+                    rlogger.info("bootstrap_with_repair: keyspace={}, range={}, a={}, b={}", keyspace_name, desired_range, x.first, x.second);
                     if (src_range.contains(desired_range, dht::tri_compare)) {
                         std::vector<inet_address> old_endpoints(x.second.begin(), x.second.end());
                         auto it = pending_range_addresses.find(desired_range);
@@ -1606,7 +1607,7 @@ future<> bootstrap_with_repair(seastar::sharded<database>& db, seastar::sharded<
                         }
 
                         std::unordered_set<inet_address> new_endpoints(it->second.begin(), it->second.end());
-                        rlogger.debug("bootstrap_with_repair: keyspace={}, range={}, old_endpoints={}, new_endpoints={}",
+                        rlogger.info("bootstrap_with_repair: keyspace={}, range={}, old_endpoints={}, new_endpoints={}",
                                 keyspace_name, desired_range, old_endpoints, new_endpoints);
                         // Due to CASSANDRA-5953 we can have a higher RF then we have endpoints.
                         // So we need to be careful to only be strict when endpoints == RF

@@ -441,7 +441,7 @@ system_distributed_keyspace::insert_cdc_generation(
     co_await max_concurrent_for_each(ms, concurrency, [&] (mutation& m) -> future<> {
         co_await _sp.mutate(
             { std::move(m) },
-            db::consistency_level::ALL,
+            db::consistency_level::ANY,
             db::timeout_clock::now() + 60s,
             nullptr, // trace_state
             empty_service_permit(),
