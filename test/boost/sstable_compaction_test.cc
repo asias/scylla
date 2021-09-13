@@ -3188,9 +3188,13 @@ SEASTAR_TEST_CASE(purged_tombstone_consumer_sstable_test) {
 
             auto gc_now = gc_clock::now();
             gc_before = gc_now - s->gc_grace_seconds();
+            auto gc_grace_seconds = s->gc_grace_seconds();
+            auto get_gc_before = [gc_grace_seconds] (const dht::decorated_key&, const gc_clock::time_point& query_time) {
+                return saturating_subtract(query_time, gc_grace_seconds);
+            };
 
             auto cfc = make_stable_flattened_mutations_consumer<compact_for_compaction<compacting_sstable_writer_test, compacting_sstable_writer_test>>(
-                *s, gc_now, max_purgeable_func, std::move(cr), std::move(purged_cr));
+                *s, gc_now, max_purgeable_func, get_gc_before, std::move(cr), std::move(purged_cr));
 
             auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::size_tiered, s->compaction_strategy_options());
             auto compacting = make_lw_shared<sstables::sstable_set>(cs.make_sstable_set(s));

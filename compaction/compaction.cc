@@ -677,6 +677,7 @@ private:
                     using compact_mutations = compact_for_compaction<compacting_sstable_writer, compacting_sstable_writer>;
                     auto cfc = make_stable_flattened_mutations_consumer<compact_mutations>(*schema(), now,
                         max_purgeable_func(),
+                        get_gc_before_func(),
                         get_compacting_sstable_writer(),
                         get_gc_compacting_sstable_writer());
 
@@ -686,9 +687,9 @@ private:
                 using compact_mutations = compact_for_compaction<compacting_sstable_writer, noop_compacted_fragments_consumer>;
                 auto cfc = make_stable_flattened_mutations_consumer<compact_mutations>(*schema(), now,
                     max_purgeable_func(),
+                    get_gc_before_func(),
                     get_compacting_sstable_writer(),
                     noop_compacted_fragments_consumer());
-
                 reader.consume_in_thread(std::move(cfc));
             });
         });
@@ -743,6 +744,17 @@ private:
         }
         return [this] (const dht::decorated_key& dk) {
             return get_max_purgeable_timestamp(_table_s, *_selector, _compacting_for_max_purgeable_func, dk);
+        };
+    }
+
+    std::function<gc_clock::time_point(const dht::decorated_key&, const gc_clock::time_point& query_time)> get_gc_before_func() {
+        if (!tombstone_expiration_enabled()) {
+            return [] (const dht::decorated_key& dk, const gc_clock::time_point& query_time) {
+                return gc_clock::time_point::min();
+            };
+        }
+        return [this] (const dht::decorated_key& dk, const gc_clock::time_point& query_time) {
+            return _cf.get_gc_before(dk, query_time);
         };
     }
 

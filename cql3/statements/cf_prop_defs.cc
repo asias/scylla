@@ -46,6 +46,7 @@
 #include "cdc/cdc_extension.hh"
 #include "gms/feature.hh"
 #include "gms/feature_service.hh"
+#include "tombstone_gc_extension.hh"
 
 #include <boost/algorithm/string/predicate.hpp>
 
@@ -156,6 +157,11 @@ void cf_prop_defs::validate(const database& db, const schema::extensions_map& sc
         throw exceptions::configuration_exception("CDC not supported by the cluster");
     }
 
+    auto tombstone_gc_options = get_tombstone_gc_options(schema_extensions);
+    if (tombstone_gc_options && !db.features().cluster_supports_tombstone_gc_options()) {
+        throw exceptions::configuration_exception("tombstone_gc option not supported by the cluster");
+    }
+
     validate_minimum_int(KW_DEFAULT_TIME_TO_LIVE, 0, DEFAULT_DEFAULT_TIME_TO_LIVE);
     validate_minimum_int(KW_PAXOSGRACESECONDS, 0, DEFAULT_GC_GRACE_SECONDS);
 
@@ -233,6 +239,16 @@ const cdc::options* cf_prop_defs::get_cdc_options(const schema::extensions_map& 
 
     auto cdc_ext = dynamic_pointer_cast<cdc::cdc_extension>(it->second);
     return &cdc_ext->get_options();
+}
+
+const tombstone_gc_options* cf_prop_defs::get_tombstone_gc_options(const schema::extensions_map& schema_exts) const {
+    auto it = schema_exts.find(tombstone_gc_extension::NAME);
+    if (it == schema_exts.end()) {
+        return nullptr;
+    }
+
+    auto ext = dynamic_pointer_cast<tombstone_gc_extension>(it->second);
+    return &ext->get_options();
 }
 
 void cf_prop_defs::apply_to_builder(schema_builder& builder, schema::extensions_map schema_extensions) const {

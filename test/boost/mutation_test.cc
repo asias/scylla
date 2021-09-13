@@ -2949,10 +2949,15 @@ void run_compaction_data_stream_split_test(const schema& schema, reader_permit p
     auto get_max_purgeable = [] (const dht::decorated_key&) {
         return api::max_timestamp;
     };
+    auto gc_grace_seconds = schema.gc_grace_seconds();
+    auto get_gc_before = [gc_grace_seconds] (const dht::decorated_key&, const gc_clock::time_point& query_time) {
+        return saturating_subtract(query_time, gc_grace_seconds);
+    };
     auto consumer = make_stable_flattened_mutations_consumer<compact_for_compaction<survived_compacted_fragments_consumer, purged_compacted_fragments_consumer>>(
             schema,
             query_time,
             get_max_purgeable,
+            get_gc_before,
             survived_compacted_fragments_consumer(schema, query_time, get_max_purgeable),
             purged_compacted_fragments_consumer(schema, query_time, get_max_purgeable));
 

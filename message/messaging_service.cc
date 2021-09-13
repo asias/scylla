@@ -463,6 +463,8 @@ static constexpr unsigned do_get_rpc_client_idx(messaging_verb verb) {
     case messaging_verb::REPAIR_GET_ROW_DIFF_WITH_RPC_STREAM:
     case messaging_verb::REPAIR_PUT_ROW_DIFF_WITH_RPC_STREAM:
     case messaging_verb::REPAIR_GET_FULL_ROW_HASHES_WITH_RPC_STREAM:
+    case messaging_verb::REPAIR_UPDATE_SYSTEM_TABLE:
+    case messaging_verb::REPAIR_FLUSH_HINTS_BATCHLOG:
     case messaging_verb::NODE_OPS_CMD:
     case messaging_verb::HINT_MUTATION:
         return 1;
@@ -1235,6 +1237,28 @@ future<> messaging_service::unregister_repair_get_diff_algorithms() {
 }
 future<std::vector<row_level_diff_detect_algorithm>> messaging_service::send_repair_get_diff_algorithms(msg_addr id) {
     return send_message<future<std::vector<row_level_diff_detect_algorithm>>>(this, messaging_verb::REPAIR_GET_DIFF_ALGORITHMS, std::move(id));
+}
+
+// Wrapper for REPAIR_UPDATE_SYSTEM_TABLE
+void messaging_service::register_repair_update_system_table(std::function<future<repair_update_system_table_response> (const rpc::client_info& cinfo, repair_update_system_table_request)>&& func) {
+    register_handler(this, messaging_verb::REPAIR_UPDATE_SYSTEM_TABLE, std::move(func));
+}
+future<> messaging_service::unregister_repair_update_system_table() {
+    return unregister_handler(messaging_verb::REPAIR_UPDATE_SYSTEM_TABLE);
+}
+future<repair_update_system_table_response> messaging_service::send_repair_update_system_table(msg_addr id, repair_update_system_table_request req) {
+    return send_message<future<repair_update_system_table_response>>(this, messaging_verb::REPAIR_UPDATE_SYSTEM_TABLE, std::move(id), std::move(req));
+}
+
+// Wrapper for REPAIR_FLUSH_HINTS_BATCHLOG
+void messaging_service::register_repair_flush_hints_batchlog(std::function<future<repair_flush_hints_batchlog_response> (const rpc::client_info& cinfo, repair_flush_hints_batchlog_request)>&& func) {
+    register_handler(this, messaging_verb::REPAIR_FLUSH_HINTS_BATCHLOG, std::move(func));
+}
+future<> messaging_service::unregister_repair_flush_hints_batchlog() {
+    return unregister_handler(messaging_verb::REPAIR_FLUSH_HINTS_BATCHLOG);
+}
+future<repair_flush_hints_batchlog_response> messaging_service::send_repair_flush_hints_batchlog(msg_addr id, repair_flush_hints_batchlog_request req) {
+    return send_message<future<repair_flush_hints_batchlog_response>>(this, messaging_verb::REPAIR_FLUSH_HINTS_BATCHLOG, std::move(id), std::move(req));
 }
 
 // Wrapper for NODE_OPS_CMD

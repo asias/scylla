@@ -2173,10 +2173,11 @@ private:
 
 public:
     compacting_reader(flat_mutation_reader source, gc_clock::time_point compaction_time,
-            std::function<api::timestamp_type(const dht::decorated_key&)> get_max_purgeable)
+            std::function<api::timestamp_type(const dht::decorated_key&)> get_max_purgeable,
+            std::function<gc_clock::time_point(const dht::decorated_key&, const gc_clock::time_point& query_time)> get_gc_before)
         : impl(source.schema(), source.permit())
         , _reader(std::move(source))
-        , _compactor(*_schema, compaction_time, get_max_purgeable)
+        , _compactor(*_schema, compaction_time, get_max_purgeable, get_gc_before)
         , _last_uncompacted_partition_start(dht::decorated_key(dht::minimum_token(), partition_key::make_empty()), tombstone{}) {
     }
     virtual future<> fill_buffer() override {
@@ -2249,8 +2250,9 @@ public:
 } // anonymous namespace
 
 flat_mutation_reader make_compacting_reader(flat_mutation_reader source, gc_clock::time_point compaction_time,
-        std::function<api::timestamp_type(const dht::decorated_key&)> get_max_purgeable) {
-    return make_flat_mutation_reader<compacting_reader>(std::move(source), compaction_time, get_max_purgeable);
+        std::function<api::timestamp_type(const dht::decorated_key&)> get_max_purgeable,
+        std::function<gc_clock::time_point(const dht::decorated_key&, const gc_clock::time_point& query_time)> get_gc_before) {
+    return make_flat_mutation_reader<compacting_reader>(std::move(source), compaction_time, get_max_purgeable, get_gc_before);
 }
 
 position_reader_queue::~position_reader_queue() {}

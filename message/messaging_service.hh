@@ -156,7 +156,9 @@ enum class messaging_verb : int32_t {
     RAFT_READ_QUORUM = 52,
     RAFT_READ_QUORUM_REPLY = 53,
     RAFT_EXECUTE_READ_BARRIER_ON_LEADER = 54,
-    LAST = 55,
+    REPAIR_UPDATE_SYSTEM_TABLE = 55,
+    REPAIR_FLUSH_HINTS_BATCHLOG = 56,
+    LAST = 57,
 };
 
 } // namespace netw
@@ -401,6 +403,14 @@ public:
     void register_repair_get_diff_algorithms(std::function<future<std::vector<row_level_diff_detect_algorithm>> (const rpc::client_info& cinfo)>&& func);
     future<> unregister_repair_get_diff_algorithms();
     future<std::vector<row_level_diff_detect_algorithm>> send_repair_get_diff_algorithms(msg_addr id);
+
+    void register_repair_update_system_table(std::function<future<repair_update_system_table_response> (const rpc::client_info& cinfo, repair_update_system_table_request)>&& func);
+    future<> unregister_repair_update_system_table();
+    future<repair_update_system_table_response> send_repair_update_system_table(msg_addr id, repair_update_system_table_request req);
+
+    void register_repair_flush_hints_batchlog(std::function<future<repair_flush_hints_batchlog_response> (const rpc::client_info& cinfo, repair_flush_hints_batchlog_request)>&& func);
+    future<> unregister_repair_flush_hints_batchlog();
+    future<repair_flush_hints_batchlog_response> send_repair_flush_hints_batchlog(msg_addr id, repair_flush_hints_batchlog_request req);
 
     // Wrapper for NODE_OPS_CMD
     void register_node_ops_cmd(std::function<future<node_ops_cmd_response> (const rpc::client_info& cinfo, node_ops_cmd_request)>&& func);

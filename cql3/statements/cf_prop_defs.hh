@@ -47,6 +47,9 @@
 #include "compaction/compaction_strategy.hh"
 #include "utils/UUID.hh"
 
+
+class tombstone_gc_options;
+
 namespace db {
 class extensions;
 }
@@ -102,6 +105,7 @@ public:
     std::optional<std::map<sstring, sstring>> get_compression_options() const;
     const cdc::options* get_cdc_options(const schema::extensions_map&) const;
     std::optional<caching_options> get_caching_options() const;
+    const tombstone_gc_options* get_tombstone_gc_options(const schema::extensions_map&) const;
 #if 0
     public CachingOptions getCachingOptions() throws SyntaxException, ConfigurationException
     {

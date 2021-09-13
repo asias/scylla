@@ -884,6 +884,17 @@ void database::add_column_family(keyspace& ks, schema_ptr schema, column_family:
     schema = local_schema_registry().learn(schema);
     schema->registry_entry()->mark_synced();
 
+    auto needs_repair_before_gc = [this, ks_name = schema->ks_name()] {
+        // If a table uses local replication strategy or rf one, there is no
+        // need to run repair even if tombstone_gc mode = repair.
+        auto& ks = find_keyspace(ks_name);
+        auto& rs = ks.get_replication_strategy();
+        auto erm = ks.get_effective_replication_map();
+        bool needs_repair = rs.get_type() != locator::replication_strategy_type::local
+                && erm->get_replication_factor() != 1;
+        return needs_repair;
+    };
+
     lw_shared_ptr<column_family> cf;
     if (cfg.enable_commitlog && _commitlog) {
        cf = make_lw_shared<column_family>(schema, std::move(cfg), *_commitlog, *_compaction_manager, *_cl_stats, _row_cache_tracker);
@@ -891,6 +902,7 @@ void database::add_column_family(keyspace& ks, schema_ptr schema, column_family:
        cf = make_lw_shared<column_family>(schema, std::move(cfg), column_family::no_commitlog(), *_compaction_manager, *_cl_stats, _row_cache_tracker);
     }
     cf->set_durable_writes(ks.metadata()->durable_writes());
+    cf->set_needs_repair_before_gc(std::move(needs_repair_before_gc));
 
     auto uuid = schema->id();
     if (_column_families.contains(uuid)) {

@@ -995,7 +995,8 @@ void view_update_builder::generate_update(clustering_row&& update, std::optional
         throw std::logic_error("Empty materialized view updated");
     }
 
-    auto gc_before = _now - _schema->gc_grace_seconds();
+    auto dk = dht::decorate_key(*_schema, _key);
+    auto gc_before = _table.get_gc_before(dk, _now);
 
     // We allow existing to be disengaged, which we treat the same as an empty row.
     if (existing) {
@@ -1107,6 +1108,7 @@ future<stop_iteration> view_update_builder::on_results() {
 }
 
 future<view_update_builder> make_view_update_builder(
+        const table& t,
         const schema_ptr& base,
         std::vector<view_and_base>&& views_to_update,
         flat_mutation_reader&& updates,
@@ -1120,7 +1122,7 @@ future<view_update_builder> make_view_update_builder(
         }
         return view_updates(std::move(v));
     }));
-    return make_ready_future<view_update_builder>(view_update_builder(base, std::move(vs), std::move(updates), std::move(existings), now));
+    return make_ready_future<view_update_builder>(view_update_builder(t, base, std::move(vs), std::move(updates), std::move(existings), now));
 }
 
 future<query::clustering_row_ranges> calculate_affected_clustering_ranges(const schema& base,

@@ -171,6 +171,7 @@ private:
 };
 
 class view_update_builder {
+    const table& _table; // The base table
     schema_ptr _schema; // The base schema
     std::vector<view_updates> _view_updates;
     flat_mutation_reader _updates;
@@ -183,12 +184,14 @@ class view_update_builder {
     partition_key _key = partition_key::make_empty();
 public:
 
-    view_update_builder(schema_ptr s,
+    view_update_builder(const table& t,
+        schema_ptr s,
         std::vector<view_updates>&& views_to_update,
         flat_mutation_reader&& updates,
         flat_mutation_reader_opt&& existings,
         gc_clock::time_point now)
-            : _schema(std::move(s))
+            : _table(t)
+            , _schema(std::move(s))
             , _view_updates(std::move(views_to_update))
             , _updates(std::move(updates))
             , _existings(std::move(existings))
@@ -214,6 +217,7 @@ private:
 };
 
 future<view_update_builder> make_view_update_builder(
+        const table& t,
         const schema_ptr& base,
         std::vector<view_and_base>&& views_to_update,
         flat_mutation_reader&& updates,

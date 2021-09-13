@@ -53,11 +53,19 @@
 #include "db/commitlog/commitlog.hh"
 
 #include <boost/range/algorithm/remove_if.hpp>
+#include <boost/icl/interval.hpp>
+#include <boost/icl/interval_map.hpp>
+#include "timestamp.hh"
+#include "tombstone_gc_options.hh"
 
 static logging::logger tlogger("table");
 static seastar::metrics::label column_family_label("cf");
 static seastar::metrics::label keyspace_label("ks");
 
+class repair_history_map {
+public:
+    boost::icl::interval_map<dht::token, gc_clock::time_point, boost::icl::partial_absorber, std::less, boost::icl::inplace_max> map;
+};
 
 using namespace std::chrono_literals;
 
@@ -1202,6 +1210,7 @@ table::table(schema_ptr schema, config config, db::commitlog* cl, compaction_man
     , _table_state(std::make_unique<table_state>(*this))
     , _row_locker(_schema)
     , _off_strategy_trigger([this] { trigger_offstrategy_compaction(); })
+    , _repair_time_map(std::make_unique<repair_history_map>())
 {
     if (!_config.enable_disk_writes) {
         tlogger.warn("Writes disabled, column family no durable.");
@@ -1656,6 +1665,7 @@ future<> table::generate_and_propagate_view_updates(const schema_ptr& base,
         gc_clock::time_point now) const {
     auto base_token = m.token();
     db::view::view_update_builder builder = co_await db::view::make_view_update_builder(
+            *this,
             base,
             std::move(views),
             make_flat_mutation_reader_from_mutations(m.schema(), std::move(permit), {std::move(m)}),
@@ -1791,6 +1801,7 @@ future<> table::populate_views(
         gc_clock::time_point now) {
     auto schema = reader.schema();
     db::view::view_update_builder builder = co_await db::view::make_view_update_builder(
+            *this,
             schema,
             std::move(views),
             std::move(reader),
@@ -2380,4 +2391,56 @@ public:
 
 compaction::table_state& table::as_table_state() const noexcept {
     return *_table_state;
+}
+
+future<> table::update_repair_time(dht::token_range range, gc_clock::time_point repair_time) {
+    _repair_time_map->map += std::make_pair(locator::token_metadata::range_to_interval(std::move(range)), repair_time);
+    return make_ready_future<>();
+}
+
+gc_clock::time_point
+table::get_gc_before(const dht::decorated_key& dk, const gc_clock::time_point& query_time) const {
+    // if mode = timeout    // default option, if user does not specify tombstone_gc options
+    // if mode = disabled   // never gc tombstone
+    // if mode = immediate  // can gc tombstone immediately
+    // if mode = repair     // gc after repair
+    const auto& options = _schema->tombstone_gc_options();
+    switch (options.mode()) {
+    case tombstone_gc_mode::timeout:
+        tlogger.info("Get gc_before for ks={}, table={}, dk={}, mode=timeout", schema()->ks_name(), schema()->cf_name(), dk);
+        return saturating_subtract(query_time, _schema->gc_grace_seconds());
+    case tombstone_gc_mode::disabled:
+        tlogger.info("Get gc_before for ks={}, table={}, dk={}, mode=disabled", schema()->ks_name(), schema()->cf_name(), dk);
+        return gc_clock::time_point::min();
+    case tombstone_gc_mode::immediate:
+        tlogger.info("Get gc_before for ks={}, table={}, dk={}, mode=immediate", schema()->ks_name(), schema()->cf_name(), dk);
+        return gc_clock::time_point::max();
+    case tombstone_gc_mode::repair:
+        const std::chrono::seconds& propagation_delay = options.propagation_delay_in_seconds();
+        auto gc_before = gc_clock::time_point::min();
+        auto repair_timestamp = gc_clock::time_point::min();
+        if (!needs_repair_before_gc()) {
+            repair_timestamp = gc_clock::now();
+            gc_before = saturating_subtract(repair_timestamp, propagation_delay);
+        } else {
+            const auto it = _repair_time_map->map.find(dk.token());
+            if (it == _repair_time_map->map.end()) {
+                gc_before = gc_clock::time_point::min();
+            } else {
+                repair_timestamp = it->second;
+                gc_before = saturating_subtract(repair_timestamp, propagation_delay);
+            }
+        }
+        tlogger.info("Get gc_before for ks={}, table={}, dk={}, mode=repair, repair_timestamp={}, propagation_delay={}, gc_before={}",
+                schema()->ks_name(), schema()->cf_name(), dk, repair_timestamp, propagation_delay.count(), gc_before);
+        return gc_before;
+    }
+}
+
+void table::set_needs_repair_before_gc(std::function<bool ()> func) {
+    _needs_repair_before_gc = std::move(func);
+}
+
+bool table::needs_repair_before_gc()  const {
+    return _needs_repair_before_gc && _needs_repair_before_gc();
 }

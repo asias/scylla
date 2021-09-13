@@ -49,6 +49,9 @@ class sharder;
 
 }
 
+
+class tombstone_gc_options;
+
 namespace cdc {
 class options;
 }
@@ -820,6 +823,8 @@ public:
     }
 
     const cdc::options& cdc_options() const;
+
+    const ::tombstone_gc_options& tombstone_gc_options() const;
 
     const ::speculative_retry& speculative_retry() const {
         return _raw._speculative_retry;

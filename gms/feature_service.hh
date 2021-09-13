@@ -93,6 +93,7 @@ private:
     gms::feature _range_scan_data_variant;
     gms::feature _cdc_generations_v2;
     gms::feature _uda;
+    gms::feature _tombstone_gc_options;
 
 public:
     bool cluster_supports_user_defined_functions() const {
@@ -167,6 +168,11 @@ public:
     bool cluster_supports_user_defined_aggregates() const {
         return bool(_uda);
     }
+
+    bool cluster_supports_tombstone_gc_options() const {
+        return bool(_tombstone_gc_options);
+    }
+
 };
 
 } // namespace gms
