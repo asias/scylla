@@ -1210,7 +1210,6 @@ table::table(schema_ptr schema, config config, db::commitlog* cl, compaction_man
     , _table_state(std::make_unique<table_state>(*this))
     , _row_locker(_schema)
     , _off_strategy_trigger([this] { trigger_offstrategy_compaction(); })
-    , _repair_time_map(std::make_unique<repair_history_map>())
 {
     if (!_config.enable_disk_writes) {
         tlogger.warn("Writes disabled, column family no durable.");
@@ -2393,6 +2392,7 @@ compaction::table_state& table::as_table_state() const noexcept {
     return *_table_state;
 }
 
+#if 0
 future<> table::update_repair_time(dht::token_range range, gc_clock::time_point repair_time) {
     _repair_time_map->map += std::make_pair(locator::token_metadata::range_to_interval(std::move(range)), repair_time);
     return make_ready_future<>();
@@ -2444,3 +2444,4 @@ void table::set_needs_repair_before_gc(std::function<bool ()> func) {
 bool table::needs_repair_before_gc()  const {
     return _needs_repair_before_gc && _needs_repair_before_gc();
 }
+#endif

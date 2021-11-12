@@ -43,6 +43,9 @@
 #include "tombstone_gc_extension.hh"
 #include "db/paxos_grace_seconds_extension.hh"
 #include "utils/rjson.hh"
+#include <boost/icl/interval.hpp>
+#include <boost/icl/interval_map.hpp>
+#include "locator/token_metadata.hh"
 
 constexpr int32_t schema::NAME_LENGTH;
 
@@ -136,6 +139,13 @@ thread_local std::map<std::pair<unsigned, unsigned>, std::unique_ptr<dht::sharde
 sstring default_partitioner_name = "org.apache.cassandra.dht.Murmur3Partitioner";
 unsigned default_partitioner_ignore_msb = 12;
 
+class repair_history_map {
+public:
+    boost::icl::interval_map<dht::token, gc_clock::time_point, boost::icl::partial_absorber, std::less, boost::icl::inplace_max> map;
+};
+
+thread_local std::unordered_map<utils::UUID, std::shared_ptr<repair_history_map>> repair_history_maps;
+
 static const dht::i_partitioner& get_partitioner(const sstring& name) {
     auto it = partitioners.find(name);
     if (it == partitioners.end()) {
@@ -157,6 +167,20 @@ static const dht::sharder& get_sharder(unsigned shard_count, unsigned ignore_msb
         it = sharders.insert({{shard_count, ignore_msb}, std::move(sharder)}).first;
     }
     return *it->second;
+}
+
+static std::shared_ptr<repair_history_map> get_repair_history_map(utils::UUID id) {
+    auto it = repair_history_maps.find(id);
+    if (it != repair_history_maps.end()) {
+        return it->second;
+    } else {
+        repair_history_maps[id] = std::make_shared<repair_history_map>();
+        return repair_history_maps[id];
+    }
+}
+
+void drop_repair_history_map(const utils::UUID& id) {
+    repair_history_maps.erase(id);
 }
 
 const dht::i_partitioner& schema::get_partitioner() const {
@@ -325,6 +349,7 @@ schema::raw_schema::raw_schema(utils::UUID id)
     : _id(id)
     , _partitioner(::get_partitioner(default_partitioner_name))
     , _sharder(::get_sharder(smp::count, default_partitioner_ignore_msb))
+    , _repair_history_map(::get_repair_history_map(id))
 { }
 
 schema::schema(private_tag, const raw_schema& raw, std::optional<raw_view_info> raw_view_info)
@@ -1648,6 +1673,52 @@ schema_ptr schema::get_reversed() const {
     return local_schema_registry().get_or_load(utils::UUID_gen::negate(_raw._version), [this] (table_schema_version) {
         return frozen_schema(make_reversed());
     });
+}
+
+
+gc_clock::time_point schema::get_gc_before(const dht::decorated_key& dk, const gc_clock::time_point& query_time) const {
+    // if mode = timeout    // default option, if user does not specify tombstone_gc options
+    // if mode = disabled   // never gc tombstone
+    // if mode = immediate  // can gc tombstone immediately
+    // if mode = repair     // gc after repair
+    const auto& options = tombstone_gc_options();
+    switch (options.mode()) {
+    case tombstone_gc_mode::timeout:
+        dblog.info("Get gc_before for ks={}, table={}, dk={}, mode=timeout", ks_name(), cf_name(), dk);
+        return saturating_subtract(query_time, gc_grace_seconds());
+    case tombstone_gc_mode::disabled:
+        dblog.info("Get gc_before for ks={}, table={}, dk={}, mode=disabled", ks_name(), cf_name(), dk);
+        return gc_clock::time_point::min();
+    case tombstone_gc_mode::immediate:
+        dblog.info("Get gc_before for ks={}, table={}, dk={}, mode=immediate", ks_name(), cf_name(), dk);
+        return gc_clock::time_point::max();
+    case tombstone_gc_mode::repair:
+        const std::chrono::seconds& propagation_delay = options.propagation_delay_in_seconds();
+        auto gc_before = gc_clock::time_point::min();
+        auto repair_timestamp = gc_clock::time_point::min();
+        if (_raw._repair_history_map) {
+            const auto it = _raw._repair_history_map->map.find(dk.token());
+            if (it == _raw._repair_history_map->map.end()) {
+                gc_before = gc_clock::time_point::min();
+            } else {
+                repair_timestamp = it->second;
+                gc_before = saturating_subtract(repair_timestamp, propagation_delay);
+            }
+        }
+        dblog.info("Get gc_before for ks={}, table={}, dk={}, mode=repair, repair_timestamp={}, propagation_delay={}, gc_before={}",
+                ks_name(), cf_name(), dk, repair_timestamp, propagation_delay.count(), gc_before);
+        return gc_before;
+    }
+}
+
+void schema::update_repair_time(const dht::token_range& range, gc_clock::time_point repair_time) const {
+    auto m = _raw._repair_history_map;
+    if (m) {
+        m->map += std::make_pair(locator::token_metadata::range_to_interval(range), repair_time);
+    } else {
+        dblog.warn("Failed to update_repair_time for ks={}, table={}, range={}, repair_time={}",
+                ks_name(), cf_name(), range, repair_time);
+    }
 }
 
 raw_view_info::raw_view_info(utils::UUID base_id, sstring base_name, bool include_all_columns, sstring where_clause)

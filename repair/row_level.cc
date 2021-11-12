@@ -2441,7 +2441,7 @@ future<> repair_service::init_ms_handlers() {
         auto& db = this->get_db();
         co_await db.invoke_on_all([&req] (database& local_db) {
             auto& table = local_db.find_column_family(req.table_uuid);
-            return table.update_repair_time(req.range, req.repair_time);
+            return table.schema()->update_repair_time(req.range, req.repair_time);
         });
         sstring cql = format("INSERT INTO system.{} (table_uuid, repair_time, repair_uuid, keyspace_name, table_name, range_start, range_end) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 db::system_keyspace::REPAIR_HISTORY);
@@ -3154,7 +3154,7 @@ future<> repair_service::load_history() {
             co_await get_db().invoke_on_all([table_uuid, range, repair_time, keyspace_name, table_name] (database& local_db) -> future<> {
                 try {
                     auto& table = local_db.find_column_family(table_uuid);
-                    co_await table.update_repair_time(range, repair_time);
+                    table.schema()->update_repair_time(range, repair_time);
                 } catch (no_such_column_family&) {
                     rlogger.trace("Table {}.{} with {} does not exist", keyspace_name, table_name, table_uuid);
                 } catch (...) {

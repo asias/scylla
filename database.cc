@@ -884,6 +884,7 @@ void database::add_column_family(keyspace& ks, schema_ptr schema, column_family:
     schema = local_schema_registry().learn(schema);
     schema->registry_entry()->mark_synced();
 
+#if 0
     auto needs_repair_before_gc = [this, ks_name = schema->ks_name()] {
         // If a table uses local replication strategy or rf one, there is no
         // need to run repair even if tombstone_gc mode = repair.
@@ -894,6 +895,7 @@ void database::add_column_family(keyspace& ks, schema_ptr schema, column_family:
                 && erm->get_replication_factor() != 1;
         return needs_repair;
     };
+#endif
 
     lw_shared_ptr<column_family> cf;
     if (cfg.enable_commitlog && _commitlog) {
@@ -902,7 +904,9 @@ void database::add_column_family(keyspace& ks, schema_ptr schema, column_family:
        cf = make_lw_shared<column_family>(schema, std::move(cfg), column_family::no_commitlog(), *_compaction_manager, *_cl_stats, _row_cache_tracker);
     }
     cf->set_durable_writes(ks.metadata()->durable_writes());
+#if 0
     cf->set_needs_repair_before_gc(std::move(needs_repair_before_gc));
+#endif
 
     auto uuid = schema->id();
     if (_column_families.contains(uuid)) {
@@ -966,6 +970,7 @@ future<> database::drop_column_family(const sstring& ks_name, const sstring& cf_
     auto& ks = find_keyspace(ks_name);
     auto uuid = find_uuid(ks_name, cf_name);
     auto cf = _column_families.at(uuid);
+    drop_repair_history_map(uuid);
     co_await remove(*cf);
     cf->clear_views();
     co_return co_await cf->await_pending_ops().then([this, &ks, cf, tsf = std::move(tsf), snapshot] {

@@ -217,6 +217,7 @@ private:
         return can_gc(t.tomb()) && t.max_deletion_time() < get_gc_before();
     };
 
+#if 0
     gc_clock::time_point get_gc_before() {
         if (_gc_before) {
             return _gc_before.value();
@@ -229,6 +230,20 @@ private:
             }
         }
     }
+#else
+    gc_clock::time_point get_gc_before() {
+        if (_gc_before) {
+            return _gc_before.value();
+        } else {
+            if (_dk) {
+                _gc_before = _schema.get_gc_before(*_dk, _query_time);
+                return _gc_before.value();
+            } else {
+                return gc_clock::time_point::min();
+            }
+        }
+    }
+#endif
 
     bool can_gc(tombstone t) {
         if (!sstable_compaction()) {

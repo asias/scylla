@@ -41,11 +41,16 @@
 #include "caching_options.hh"
 #include "column_computation.hh"
 #include "timestamp.hh"
+#include "range.hh"
 
 namespace dht {
 
 class i_partitioner;
 class sharder;
+class decorated_key;
+class token;
+
+using token_range = nonwrapping_range<token>;
 
 }
 
@@ -591,6 +596,9 @@ class schema;
 
 using schema_ptr = lw_shared_ptr<const schema>;
 
+
+class repair_history_map;
+
 /*
  * Effectively immutable.
  * Not safe to access across cores because of shared_ptr's.
@@ -656,6 +664,7 @@ private:
         // Sharding info is not stored in the schema mutation and does not affect
         // schema digest. It is also not set locally on a schema tables.
         std::reference_wrapper<const dht::sharder> _sharder;
+        std::shared_ptr<repair_history_map> _repair_history_map;
     };
     raw_schema _raw;
     thrift_schema _thrift;
@@ -1005,6 +1014,9 @@ public:
     //      assert(schema->get_reversed().get() == reverse_schema.get());
     //
     schema_ptr get_reversed() const;
+public:
+    gc_clock::time_point get_gc_before(const dht::decorated_key& dk, const gc_clock::time_point& query_time) const;
+    void update_repair_time(const dht::token_range& range, gc_clock::time_point repair_time) const;
 };
 
 lw_shared_ptr<const schema> make_shared_schema(std::optional<utils::UUID> id, std::string_view ks_name, std::string_view cf_name,
@@ -1059,3 +1071,5 @@ inline void check_schema_version(table_schema_version expected, const schema& ac
         throw_with_backtrace<schema_mismatch_error>(expected, access);
     }
 }
+
+void drop_repair_history_map(const utils::UUID& id);

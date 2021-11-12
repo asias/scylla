@@ -1086,6 +1086,7 @@ public:
 
     compaction::table_state& as_table_state() const noexcept;
 
+#if 0
 private:
     std::unique_ptr<repair_history_map> _repair_time_map;
     std::function<bool ()> _needs_repair_before_gc;
@@ -1095,6 +1096,7 @@ public:
     future<> update_repair_time(dht::token_range range, gc_clock::time_point repair_time);
     gc_clock::time_point get_gc_before(const dht::decorated_key& dk, const gc_clock::time_point& query_time) const;
     void set_needs_repair_before_gc(std::function<bool ()> func);
+#endif
 };
 
 class user_types_metadata;

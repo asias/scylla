@@ -996,7 +996,8 @@ void view_update_builder::generate_update(clustering_row&& update, std::optional
     }
 
     auto dk = dht::decorate_key(*_schema, _key);
-    auto gc_before = _table.get_gc_before(dk, _now);
+    auto gc_before = _schema->get_gc_before(dk, _now);
+    (void)_table;
 
     // We allow existing to be disengaged, which we treat the same as an empty row.
     if (existing) {

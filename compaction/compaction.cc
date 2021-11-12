@@ -754,7 +754,7 @@ private:
             };
         }
         return [this] (const dht::decorated_key& dk, const gc_clock::time_point& query_time) {
-            return _cf.get_gc_before(dk, query_time);
+            return schema()->get_gc_before(dk, query_time);
         };
     }
 
