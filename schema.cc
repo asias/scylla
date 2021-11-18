@@ -1675,6 +1675,49 @@ schema_ptr schema::get_reversed() const {
     });
 }
 
+std::pair<gc_clock::time_point, bool> schema::get_gc_before(const dht::token_range& range, const gc_clock::time_point& query_time) const {
+    bool knows_entire_range = true;
+    const auto& options = tombstone_gc_options();
+    switch (options.mode()) {
+    case tombstone_gc_mode::timeout:
+        dblog.trace("Get gc_before for ks={}, table={}, range={}, mode=timeout", ks_name(), cf_name(), range);
+        return {saturating_subtract(query_time, gc_grace_seconds()), knows_entire_range};
+    case tombstone_gc_mode::disabled:
+        dblog.trace("Get gc_before for ks={}, table={}, range={}, mode=disabled", ks_name(), cf_name(), range);
+        return {gc_clock::time_point::min(), knows_entire_range};
+    case tombstone_gc_mode::immediate:
+        dblog.trace("Get gc_before for ks={}, table={}, range={}, mode=immediate", ks_name(), cf_name(), range);
+        return {gc_clock::time_point::max(), knows_entire_range};
+    case tombstone_gc_mode::repair:
+        const std::chrono::seconds& propagation_delay = options.propagation_delay_in_seconds();
+        auto gc_before = gc_clock::time_point::min();
+        auto repair_timestamp = gc_clock::time_point::min();
+        int hits = 0;
+        if (_raw._repair_history_map) {
+            auto interval = locator::token_metadata::range_to_interval(range);
+            auto min_repair_timestamp = gc_clock::time_point::max();
+            bool contains_all = false;
+            for (auto& x : boost::make_iterator_range(_raw._repair_history_map->map.equal_range(interval))) {
+                auto r = locator::token_metadata::interval_to_range(x.first);
+                min_repair_timestamp = std::min(x.second, min_repair_timestamp);
+                if (++hits == 1 && r.contains(range, dht::tri_compare)) {
+                    contains_all = true;
+                }
+            }
+            if (hits == 0) {
+                knows_entire_range = false;
+                repair_timestamp = gc_clock::time_point::min();
+            } else {
+                knows_entire_range = hits == 1 && contains_all;
+                repair_timestamp = min_repair_timestamp;
+            }
+            gc_before = saturating_subtract(repair_timestamp, propagation_delay);
+        }
+        dblog.info("Get gc_before for ks={}, table={}, range={}, mode=repair, repair_timestamp={}, propagation_delay={}, gc_before={}, hits={}, knows_entire_range={}",
+                ks_name(), cf_name(), range, repair_timestamp, propagation_delay.count(), gc_before, hits, knows_entire_range);
+        return {gc_before, knows_entire_range};
+    }
+}
 
 gc_clock::time_point schema::get_gc_before(const dht::decorated_key& dk, const gc_clock::time_point& query_time) const {
     // if mode = timeout    // default option, if user does not specify tombstone_gc options
@@ -1684,13 +1727,13 @@ gc_clock::time_point schema::get_gc_before(const dht::decorated_key& dk, const g
     const auto& options = tombstone_gc_options();
     switch (options.mode()) {
     case tombstone_gc_mode::timeout:
-        dblog.info("Get gc_before for ks={}, table={}, dk={}, mode=timeout", ks_name(), cf_name(), dk);
+        dblog.trace("Get gc_before for ks={}, table={}, dk={}, mode=timeout", ks_name(), cf_name(), dk);
         return saturating_subtract(query_time, gc_grace_seconds());
     case tombstone_gc_mode::disabled:
-        dblog.info("Get gc_before for ks={}, table={}, dk={}, mode=disabled", ks_name(), cf_name(), dk);
+        dblog.trace("Get gc_before for ks={}, table={}, dk={}, mode=disabled", ks_name(), cf_name(), dk);
         return gc_clock::time_point::min();
     case tombstone_gc_mode::immediate:
-        dblog.info("Get gc_before for ks={}, table={}, dk={}, mode=immediate", ks_name(), cf_name(), dk);
+        dblog.trace("Get gc_before for ks={}, table={}, dk={}, mode=immediate", ks_name(), cf_name(), dk);
         return gc_clock::time_point::max();
     case tombstone_gc_mode::repair:
         const std::chrono::seconds& propagation_delay = options.propagation_delay_in_seconds();

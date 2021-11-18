@@ -1015,6 +1015,7 @@ public:
     //
     schema_ptr get_reversed() const;
 public:
+    std::pair<gc_clock::time_point, bool> get_gc_before(const dht::token_range& range, const gc_clock::time_point& query_time) const;
     gc_clock::time_point get_gc_before(const dht::decorated_key& dk, const gc_clock::time_point& query_time) const;
     void update_repair_time(const dht::token_range& range, gc_clock::time_point repair_time) const;
 };
