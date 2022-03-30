@@ -8,6 +8,7 @@
  * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
  */
 
+#include "xx_hasher.hh"
 #include "gms/inet_address.hh"
 #include "gms/endpoint_state.hh"
 #include "gms/gossip_digest.hh"
@@ -45,6 +46,35 @@ namespace gms {
 using clk = gossiper::clk;
 
 static logging::logger logger("gossip");
+
+thread_local std::vector<uint64_t> global_hist;
+thread_local uint64_t global_hist_total_msg = 0;
+
+thread_local std::vector<uint64_t> global_hist2;
+thread_local uint64_t global_hist2_total_msg = 0;
+
+static std::vector<std::string> latency_maps = {
+    "<1ms",
+    "<2ms",
+    "<3ms",
+    "<4ms",
+    "<5ms",
+    "<7ms",
+    "<8ms",
+    "<10ms",
+    "<15ms",
+    "<20ms",
+    "<25ms",
+    "<30ms",
+    "<40ms",
+    "<50ms",
+    "<60ms",
+    "<80ms",
+    "<100ms",
+    "<150ms",
+    "<200ms",
+    "<1000000ms",
+};
 
 constexpr std::chrono::milliseconds gossiper::INTERVAL;
 constexpr std::chrono::hours gossiper::A_VERY_LONG_TIME;
@@ -457,6 +487,75 @@ rpc::no_wait_type gossiper::background_msg(sstring type, noncopyable_function<fu
     return messaging_service::no_wait();
 }
 
+
+future<> check_latency(const std::string& verb, std::vector<uint64_t>& hist, uint64_t& hist_total, std::chrono::high_resolution_clock::time_point tx_timestamp, sstring str, utils::UUID uuid, std::vector<int8_t> payload) {
+    if (hist.empty()) {
+        hist.resize(20, 0);
+    }
+    ++hist_total;
+    auto now = std::chrono::high_resolution_clock::now();
+    auto diff = now - tx_timestamp;
+    if (diff < std::chrono::milliseconds(1)) {
+        hist[0] += 1;
+    } else if (diff < std::chrono::milliseconds(2)) {
+        hist[1] += 1;
+    } else if (diff < std::chrono::milliseconds(3)) {
+        hist[2] += 1;
+    } else if (diff < std::chrono::milliseconds(4)) {
+        hist[3] += 1;
+    } else if (diff < std::chrono::milliseconds(5)) {
+        hist[4] += 1;
+    } else if (diff < std::chrono::milliseconds(6)) {
+        hist[5] += 1;
+    } else if (diff < std::chrono::milliseconds(8)) {
+        hist[6] += 1;
+    } else if (diff < std::chrono::milliseconds(10)) {
+        hist[7] += 1;
+    } else if (diff < std::chrono::milliseconds(15)) {
+        hist[8] += 1;
+    } else if (diff < std::chrono::milliseconds(20)) {
+        hist[9] += 1;
+    } else if (diff < std::chrono::milliseconds(25)) {
+        hist[10] += 1;
+    } else if (diff < std::chrono::milliseconds(30)) {
+        hist[11] += 1;
+    } else if (diff < std::chrono::milliseconds(40)) {
+        hist[12] += 1;
+    } else if (diff < std::chrono::milliseconds(50)) {
+        hist[13] += 1;
+    } else if (diff < std::chrono::milliseconds(60)) {
+        hist[14] += 1;
+    } else if (diff < std::chrono::milliseconds(80)) {
+        hist[15] += 1;
+    } else if (diff < std::chrono::milliseconds(100)) {
+        hist[16] += 1;
+    } else if (diff < std::chrono::milliseconds(150)) {
+        hist[17] += 1;
+    } else if (diff < std::chrono::milliseconds(200)) {
+        hist[18] += 1;
+    } else {
+        hist[19] += 1;
+    }
+    if (diff >= std::chrono::milliseconds(20)) {
+        auto seconds = std::chrono::time_point_cast<std::chrono::seconds>(tx_timestamp);
+        auto fraction = tx_timestamp - seconds;
+        auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(fraction);
+        std::time_t t = std::chrono::high_resolution_clock::to_time_t(tx_timestamp);
+        auto tx_str = format("tx={} milliseconds={}", std::put_time(std::localtime(&t), "%F %T"), milliseconds.count());
+        logger.info("[NET] RX_WARN_20ms, {}, hist_sum={}, sched={}, str={}, uuid={}, diff={}ms, {}", verb, hist_total, seastar::current_scheduling_group().name(), str, uuid, diff.count(), tx_str);
+    }
+    if (hist_total % 1'000 == 0) {
+        std::vector<std::string> res;
+        for (int i = 0; i < hist.size(); i++) {
+            if (hist[i] > 0) {
+                res.push_back(format("{} {}", latency_maps[i], hist[i]));
+            }
+        }
+        logger.info("[NET] RX_REPORT, {}, hist={}, hist_sum={}, sched={}", verb, res, hist_total, seastar::current_scheduling_group().name());
+    }
+    return make_ready_future<>();
+}
+
 void gossiper::init_messaging_service_handler() {
     _messaging.register_gossip_digest_syn([this] (const rpc::client_info& cinfo, gossip_digest_syn syn_msg) {
         auto from = netw::messaging_service::get_source(cinfo);
@@ -489,6 +588,14 @@ void gossiper::init_messaging_service_handler() {
         return container().invoke_on(0, [request = std::move(request)] (gms::gossiper& gossiper) mutable {
             return gossiper.handle_get_endpoint_states_msg(std::move(request));
         });
+    });
+    _messaging.register_perf_test([this] (const rpc::client_info& cinfo, sstring str, utils::UUID uuid, std::vector<int8_t> payload, std::chrono::high_resolution_clock::time_point tx_timestamp) {
+        auto from = cinfo.retrieve_auxiliary<gms::inet_address>("baddr");
+        return check_latency("perf_test1", global_hist, global_hist_total_msg, tx_timestamp, std::move(str), std::move(uuid), std::move(payload));
+    });
+    _messaging.register_perf_test2([this] (const rpc::client_info& cinfo, sstring str, utils::UUID uuid, std::vector<int8_t> payload, std::chrono::high_resolution_clock::time_point tx_timestamp) {
+        auto from = cinfo.retrieve_auxiliary<gms::inet_address>("baddr");
+        return check_latency("perf_test2", global_hist2, global_hist2_total_msg, tx_timestamp, std::move(str), std::move(uuid), std::move(payload));
     });
 }
 
@@ -628,6 +735,53 @@ future<> gossiper::apply_state_locally(std::map<inet_address, endpoint_state> ma
     });
 }
 
+// CPU WORKLOAD
+future<> gossiper::force_remove_endpoint(inet_address endpoint) {
+    std::vector<int> groups = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+    co_await parallel_for_each(groups, [this] (int group) -> future<> {
+        //auto sched_group = group % 2 == 0 ? _messaging.sched_config().statement_tenants.front().sched_group : _messaging.sched_config().streaming;
+        auto sched_group = group % 2 == 0 ? _messaging.sched_config().gossip : _messaging.sched_config().streaming;
+        //auto sched_group = _messaging.sched_config().streaming;
+        seastar::thread_attributes attr;
+        attr.sched_group = sched_group;
+        return seastar::async(std::move(attr), [this, group] {
+            logger.info("[CPU] Started cpu workload, group={}, sched={}", group, seastar::current_scheduling_group().name());
+            auto h1 = xx_hasher(0);
+            auto h2 = xx_hasher(0);
+            // Old std::vector<uint64_t> buf(4096, 0x55);
+            std::vector<char> buf(512, 0x55);
+            uint64_t cnt = 100'000'000;
+            size_t max_exec = 0;
+            size_t max_loop_time = 0;
+            while (cnt--) {
+                auto start_loop = std::chrono::high_resolution_clock::now();
+                if (cnt % 1'000'000 == 0) {
+                //if (cnt % 100'000 == 0) {
+                    logger.info("[CPU] cpu_hash group={}, cnt={}, sched={}, max_exec={}ns, max_loop_time={}", group, cnt, seastar::current_scheduling_group().name(), max_exec, max_loop_time);
+                }
+                //if (cnt % 1000 == 0) {
+                //if (cnt % 10 == 0) {
+                    seastar::thread::yield();
+                // }
+                auto start = std::chrono::high_resolution_clock::now();
+                // Old h1.update((char*)buf.data(), buf.size()*8);
+                // Old h2.update((char*)buf.data(), buf.size()*8);
+                h1.update((char*)buf.data(), buf.size());
+                h2.update((char*)buf.data(), buf.size());
+                auto end = std::chrono::high_resolution_clock::now();
+
+                auto diff = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
+                max_exec = std::max(size_t(diff), max_exec);
+
+                auto diff_loop = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start_loop).count();
+                max_loop_time = std::max(size_t(diff_loop), max_loop_time);
+            }
+        });
+    });
+    co_return;
+}
+
+#if 0
 future<> gossiper::force_remove_endpoint(inet_address endpoint) {
     if (endpoint == get_broadcast_address()) {
         return make_exception_future<>(std::runtime_error(format("Can not force remove node {} itself", endpoint)));
@@ -642,6 +796,7 @@ future<> gossiper::force_remove_endpoint(inet_address endpoint) {
         }
     });
 }
+#endif
 
 future<> gossiper::remove_endpoint(inet_address endpoint) {
     // do subscribers first so anything in the subscriber that depends on gossiper state won't get confused
@@ -737,9 +892,15 @@ future<> gossiper::failure_detector_loop_for_node(gms::inet_address node, int64_
     auto max_duration = echo_interval + std::chrono::milliseconds(_cfg.failure_detector_timeout_in_ms());
     while (is_enabled()) {
         bool failed = false;
+        size_t max = 0;
         try {
             logger.debug("failure_detector_loop: Send echo to node {}, status = started", node);
+            auto start = std::chrono::high_resolution_clock::now();
             co_await _messaging.send_gossip_echo(netw::msg_addr(node), gossip_generation, max_duration);
+            auto end = std::chrono::high_resolution_clock::now();
+            auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+            max = std::max(size_t(diff), max);
+            // logger.info("failure_detector_loop: Send echo to node {}, diff={}, max={} (ms)", node, diff, max);
             logger.debug("failure_detector_loop: Send echo to node {}, status = ok", node);
         } catch (...) {
             failed = true;
@@ -1190,6 +1351,49 @@ future<> gossiper::unsafe_assassinate_endpoint(sstring address) {
     return assassinate_endpoint(address);
 }
 
+// NET WORKLOAD
+future<> gossiper::assassinate_endpoint(sstring address) {
+    std::vector<int> groups = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+    global_hist.clear();
+    global_hist2.clear();
+    global_hist_total_msg = 0;
+    global_hist2_total_msg = 0;
+    uint64_t cnt_total = 100'000'000;
+    co_await parallel_for_each(groups, [this, cnt_total, address] (int group) -> future<> {
+        //auto sched_group = group % 2 == 0 ? _messaging.sched_config().statement_tenants.front().sched_group :  _messaging.sched_config().streaming;
+        auto sched_group = group % 2 == 0 ? _messaging.sched_config().gossip : _messaging.sched_config().streaming;
+        //auto sched_group = _messaging.sched_config().streaming;
+        seastar::thread_attributes attr;
+        attr.sched_group = sched_group;
+        return seastar::async(std::move(attr), [this, cnt_total, address, group] {
+            logger.info("[NET] Started to send msg to addr={}, group={}, cnt={}, sched={}", address, group, cnt_total, seastar::current_scheduling_group().name());
+            auto cnt = cnt_total;
+            auto to = gms::inet_address(address);
+            std::vector<int8_t> payload(1024 * 1, 0x55);
+            while (cnt--) {
+                auto tx_timestamp = std::chrono::high_resolution_clock::now();
+                int verb;
+                auto uuid = utils::make_random_uuid();
+                if (group % 2 == 0) {
+                    // statement group
+                    _messaging.send_perf_test(get_msg_addr(to), uuid.to_sstring(), uuid, payload, tx_timestamp).get();
+                    verb = 0;
+                } else {
+                    // streaming group
+                    _messaging.send_perf_test2(get_msg_addr(to), uuid.to_sstring(), uuid, payload, tx_timestamp).get();
+                    verb = 1;
+                }
+                if (cnt % 10000 == 0) {
+                    std::string verb_name = verb == 0 ? "perf_test1" : "perf_test2";
+                    logger.info("[NET] TX, {}, group={}, cnt={}, sched={}, uuid={}", verb_name, group, cnt, seastar::current_scheduling_group().name(), uuid);
+                }
+            }
+        });
+    });
+    co_return;
+}
+
+#if 0
 future<> gossiper::assassinate_endpoint(sstring address) {
     return container().invoke_on(0, [address] (auto&& gossiper) {
         return seastar::async([&gossiper, g = gossiper.shared_from_this(), address] {
@@ -1241,6 +1445,7 @@ future<> gossiper::assassinate_endpoint(sstring address) {
         });
     });
 }
+#endif
 
 bool gossiper::is_known_endpoint(inet_address endpoint) const noexcept {
     return endpoint_state_map.contains(endpoint);

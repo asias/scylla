@@ -24,6 +24,8 @@
 #include <seastar/util/bool_class.hh>
 #include <seastar/core/metrics_registration.hh>
 #include <seastar/core/coroutine.hh>
+#include <seastar/core/reactor.hh>
+#include <seastar/core/sleep.hh>
 #include <list>
 #include <vector>
 #include <algorithm>
@@ -2739,6 +2741,39 @@ private:
         co_return;
     }
 
+    void throttle_cpu_bak1() {
+#if 0
+        return;
+        int nr = 0;
+        auto util = 1 - engine().load();
+        while (util > 0.5 && nr < 100) {
+            nr++;
+            seastar::sleep(std::chrono::milliseconds(10)).get();
+            // seastar::thread::yield();
+            util = 1 - engine().load();
+        }
+        if (nr > 0) {
+            rlogger.info("Throttle cpu utilization={}, nr={}", util, nr);
+        }
+#endif
+    }
+
+    void throttle_cpu() {
+#if 0
+        return;
+        int nr = 0;
+        auto util = 1 - engine().load();
+        while (util > 0.5 && nr < 100) {
+            nr++;
+            seastar::thread::yield();
+            util = 1 - engine().load();
+        }
+        if (nr > 0) {
+            rlogger.info("Throttle cpu utilization={}, nr={}", util, nr);
+        }
+#endif
+    }
+
 public:
     future<> run() {
         return seastar::async([this] {
@@ -2821,16 +2856,19 @@ public:
                 }).get();
 
                 while (true) {
+                    throttle_cpu();
                     auto status = negotiate_sync_boundary(master);
                     if (status == op_status::next_round) {
                         continue;
                     } else if (status == op_status::all_done) {
                         break;
                     }
+                    throttle_cpu();
                     status = get_missing_rows_from_follower_nodes(master);
                     if (status == op_status::next_round) {
                         continue;
                     }
+                    throttle_cpu();
                     send_missing_rows_to_follower_nodes(master);
                 }
             } catch (replica::no_such_column_family& e) {
