@@ -750,6 +750,9 @@ future<> gossiper::force_remove_endpoint(inet_address endpoint) {
         //auto sched_group = _messaging.sched_config().streaming;
         seastar::thread_attributes attr;
         attr.sched_group = sched_group;
+        if (sched_group == _messaging.sched_config().gossip) {
+            return make_ready_future<>();
+        }
         return seastar::async(std::move(attr), [this, group] {
             logger.info("[CPU] Started cpu workload, group={}, sched={}", group, seastar::current_scheduling_group().name());
             auto h1 = xx_hasher(0);
