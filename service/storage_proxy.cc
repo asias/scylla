@@ -119,6 +119,7 @@ seastar::metrics::label_instance current_scheduling_group_label() {
 }
 
 thread_local uint64_t paxos_response_handler::next_id = 0;
+thread_local std::vector<uint64_t> hist;
 
 distributed<service::storage_proxy> _the_storage_proxy;
 
@@ -4902,12 +4903,13 @@ void storage_proxy::init_messaging_service(shared_ptr<migration_manager> mm) {
                     //
                     // Usually we will return immediately, since this work only involves appending data to the connection
                     // send buffer.
+                    auto tx_timestamp = std::chrono::high_resolution_clock::now();
                     tracing::trace(trace_state_ptr, "Sending mutation_done to /{}", reply_to);
                     return ser::storage_proxy_rpc_verbs::send_mutation_done(&p->_messaging,
                             netw::messaging_service::msg_addr{reply_to, shard},
                             shard,
                             response_id,
-                            p->get_view_update_backlog()).then_wrapped([] (future<> f) {
+                            p->get_view_update_backlog(), tx_timestamp).then_wrapped([] (future<> f) {
                         f.ignore_ready_future();
                     });
                 }).handle_exception([reply_to, shard, &p, &errors] (std::exception_ptr eptr) {
@@ -4996,7 +4998,48 @@ void storage_proxy::init_messaging_service(shared_ptr<migration_manager> mm) {
                     return ser::storage_proxy_rpc_verbs::send_paxos_learn(&p->_messaging, addr, timeout, m, {}, reply_to, shard, response_id, std::move(trace_info));
               });
     });
-    ser::storage_proxy_rpc_verbs::register_mutation_done(&ms, [this] (const rpc::client_info& cinfo, unsigned shard, storage_proxy::response_id_type response_id, rpc::optional<db::view::update_backlog> backlog) {
+    ser::storage_proxy_rpc_verbs::register_mutation_done(&ms, [this] (const rpc::client_info& cinfo, unsigned shard, storage_proxy::response_id_type response_id, rpc::optional<db::view::update_backlog> backlog, rpc::optional<std::chrono::high_resolution_clock::time_point> tx_timestamp) {
+        if (tx_timestamp) {
+            if (hist.empty()) {
+                hist.resize(15, 0);
+            }
+            auto now = std::chrono::high_resolution_clock::now();
+            auto diff = now - tx_timestamp.value();
+            if (diff < std::chrono::milliseconds(1)) {
+                hist[0] += 1;
+            } else if (diff < std::chrono::milliseconds(5)) {
+                hist[1] += 1;
+            } else if (diff < std::chrono::milliseconds(10)) {
+                hist[2] += 1;
+            } else if (diff < std::chrono::milliseconds(15)) {
+                hist[3] += 1;
+            } else if (diff < std::chrono::milliseconds(20)) {
+                hist[4] += 1;
+            } else if (diff < std::chrono::milliseconds(25)) {
+                hist[5] += 1;
+            } else if (diff < std::chrono::milliseconds(30)) {
+                hist[6] += 1;
+            } else if (diff < std::chrono::milliseconds(40)) {
+                hist[7] += 1;
+            } else if (diff < std::chrono::milliseconds(60)) {
+                hist[8] += 1;
+            } else if (diff < std::chrono::milliseconds(80)) {
+                hist[9] += 1;
+            } else if (diff < std::chrono::milliseconds(100)) {
+                hist[10] += 1;
+            } else if (diff < std::chrono::milliseconds(200)) {
+                hist[11] += 1;
+            } else {
+                hist[12] += 1;
+            }
+            if (diff > std::chrono::milliseconds(50)) {
+                uint64_t hist_sum = 0;
+                for (auto& x : hist) {
+                    hist_sum += x;
+                }
+                slogger.info("tx_timestamp={}, diff={} ms, hist={}, hist_sum={}", tx_timestamp->time_since_epoch(), std::chrono::duration_cast<std::chrono::milliseconds>(diff).count(), hist, hist_sum);
+            }
+        }
         auto& from = cinfo.retrieve_auxiliary<gms::inet_address>("baddr");
         get_stats().replica_cross_shard_ops += shard != this_shard_id();
         return container().invoke_on(shard, _write_ack_smp_service_group, [from, response_id, backlog = std::move(backlog)] (storage_proxy& sp) mutable {

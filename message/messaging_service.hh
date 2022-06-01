@@ -151,7 +151,9 @@ enum class messaging_verb : int32_t {
     REPAIR_UPDATE_SYSTEM_TABLE = 59,
     REPAIR_FLUSH_HINTS_BATCHLOG = 60,
     FORWARD_REQUEST = 61,
-    LAST = 62,
+    PERF_TEST = 62,
+    PERF_TEST2 = 63,
+    LAST = 64,
 };
 
 } // namespace netw
@@ -294,6 +296,10 @@ public:
     messaging_service(config cfg, scheduling_config scfg, std::shared_ptr<seastar::tls::credentials_builder>);
     ~messaging_service();
 
+    scheduling_config& sched_config() {
+        return _scheduling_config;
+    }
+
     future<> start_listen();
     uint16_t port();
     gms::inet_address listen_address();
@@ -412,6 +418,14 @@ public:
     void register_gossip_echo(std::function<future<> (const rpc::client_info& cinfo, rpc::optional<int64_t> generation_number)>&& func);
     future<> unregister_gossip_echo();
     future<> send_gossip_echo(msg_addr id, int64_t generation_number, std::chrono::milliseconds timeout);
+
+    void register_perf_test(std::function<future<> (const rpc::client_info& cinfo, sstring str, utils::UUID uuid, std::vector<int8_t> payload, std::chrono::high_resolution_clock::time_point tx_timestamp)>&& func);
+    future<> unregister_perf_test();
+    future<> send_perf_test(msg_addr id, sstring str, utils::UUID uuid, std::vector<int8_t> payload, std::chrono::high_resolution_clock::time_point tx_timestamp);
+
+    void register_perf_test2(std::function<future<> (const rpc::client_info& cinfo, sstring str, utils::UUID uuid, std::vector<int8_t> payload, std::chrono::high_resolution_clock::time_point tx_timestamp)>&& func);
+    future<> unregister_perf_test2();
+    future<> send_perf_test2(msg_addr id, sstring str, utils::UUID uuid, std::vector<int8_t> payload, std::chrono::high_resolution_clock::time_point tx_timestamp);
 
     // Wrapper for GOSSIP_SHUTDOWN
     void register_gossip_shutdown(std::function<rpc::no_wait_type (inet_address from, rpc::optional<int64_t> generation_number)>&& func);

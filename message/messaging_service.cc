@@ -445,6 +445,7 @@ static constexpr unsigned do_get_rpc_client_idx(messaging_verb verb) {
     // should not be blocked by any data requests.
     case messaging_verb::GROUP0_PEER_EXCHANGE:
     case messaging_verb::GROUP0_MODIFY_CONFIG:
+    case messaging_verb::PERF_TEST:
         return 0;
     case messaging_verb::PREPARE_MESSAGE:
     case messaging_verb::PREPARE_DONE_MESSAGE:
@@ -471,6 +472,7 @@ static constexpr unsigned do_get_rpc_client_idx(messaging_verb verb) {
     case messaging_verb::REPAIR_FLUSH_HINTS_BATCHLOG:
     case messaging_verb::NODE_OPS_CMD:
     case messaging_verb::HINT_MUTATION:
+    case messaging_verb::PERF_TEST2:
         return 1;
     case messaging_verb::CLIENT_ID:
     case messaging_verb::MUTATION:
@@ -974,6 +976,26 @@ future<> messaging_service::unregister_gossip_echo() {
 }
 future<> messaging_service::send_gossip_echo(msg_addr id, int64_t generation_number, std::chrono::milliseconds timeout) {
     return send_message_timeout<void>(this, messaging_verb::GOSSIP_ECHO, std::move(id), timeout, generation_number);
+}
+
+void messaging_service::register_perf_test(std::function<future<> (const rpc::client_info& cinfo, sstring str, utils::UUID uuid, std::vector<int8_t> payload, std::chrono::high_resolution_clock::time_point tx_timestamp)>&& func) {
+    register_handler(this, messaging_verb::PERF_TEST, std::move(func));
+}
+future<> messaging_service::unregister_perf_test() {
+    return unregister_handler(netw::messaging_verb::PERF_TEST);
+}
+future<> messaging_service::send_perf_test(msg_addr id, sstring str, utils::UUID uuid, std::vector<int8_t> payload, std::chrono::high_resolution_clock::time_point tx_timestamp) {
+    return send_message<void>(this, messaging_verb::PERF_TEST,  std::move(id), std::move(str), std::move(uuid), std::move(payload), std::move(tx_timestamp));
+}
+
+void messaging_service::register_perf_test2(std::function<future<> (const rpc::client_info& cinfo, sstring str, utils::UUID uuid, std::vector<int8_t> payload, std::chrono::high_resolution_clock::time_point tx_timestamp)>&& func) {
+    register_handler(this, messaging_verb::PERF_TEST2, std::move(func));
+}
+future<> messaging_service::unregister_perf_test2() {
+    return unregister_handler(netw::messaging_verb::PERF_TEST2);
+}
+future<> messaging_service::send_perf_test2(msg_addr id, sstring str, utils::UUID uuid, std::vector<int8_t> payload, std::chrono::high_resolution_clock::time_point tx_timestamp) {
+    return send_message<void>(this, messaging_verb::PERF_TEST2, std::move(id), std::move(str), std::move(uuid), std::move(payload), std::move(tx_timestamp));
 }
 
 void messaging_service::register_gossip_shutdown(std::function<rpc::no_wait_type (inet_address from, rpc::optional<int64_t> generation_number)>&& func) {
