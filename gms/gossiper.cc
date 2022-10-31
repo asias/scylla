@@ -2206,6 +2206,12 @@ void gossiper::dump_endpoint_state_map() {
         logger.info("endpoint={}, endpoint_state={}", x.first, x.second);
     }
     logger.info("=== endpoint_state_map dump ends ===");
+
+    logger.info("=== dump token_metadata starts ===");
+    for (auto& x : get_token_metadata_ptr()->get_token_to_endpoint()) {
+        logger.info("token owners: token={} -> endpoint={}", x.first, x.second);
+    }
+    logger.info("=== dump token_metadata ends ===");
 }
 
 bool gossiper::is_alive(inet_address ep) const {
