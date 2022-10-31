@@ -5056,33 +5056,33 @@ db::hints::manager& storage_proxy::hints_manager_for(db::write_type type) {
 }
 
 future<> storage_proxy::truncate_blocking(sstring keyspace, sstring cfname) {
-    slogger.debug("Starting a blocking truncate operation on keyspace {}, CF {}", keyspace, cfname);
+    slogger.info("Starting a blocking truncate operation on keyspace {}, CF {}", keyspace, cfname);
 
-    if (!_gossiper.get_unreachable_token_owners().empty()) {
-        slogger.info("Cannot perform truncate, some hosts are down");
+    auto live_nodes = _gossiper.get_live_token_owners();
+    auto down_nodes = _gossiper.get_unreachable_token_owners();
+    if (!down_nodes.empty()) {
+        slogger.warn("Cannot perform truncate, some hosts are down, ks={}, table={}, live_token_owners={}, unreachable_token_owners={}",
+                keyspace, cfname, live_nodes, down_nodes);
+        _gossiper.dump_endpoint_state_map();
         // Since the truncate operation is so aggressive and is typically only
         // invoked by an admin, for simplicity we require that all nodes are up
         // to perform the operation.
-        auto live_members = _gossiper.get_live_members().size();
-
         return make_exception_future<>(exceptions::unavailable_exception(db::consistency_level::ALL,
-                live_members + _gossiper.get_unreachable_members().size(),
-                live_members));
+                live_nodes.size() + down_nodes.size(), live_nodes.size()));
     }
 
-    auto all_endpoints = _gossiper.get_live_token_owners();
     auto& ms = _messaging;
     auto timeout = clock_type::now() + std::chrono::milliseconds(_db.local().get_config().truncate_request_timeout_in_ms());
 
-    slogger.trace("Enqueuing truncate messages to hosts {}", all_endpoints);
+    slogger.info("Enqueuing truncate messages to hosts {}", live_nodes);
 
-    return parallel_for_each(all_endpoints, [keyspace, cfname, &ms, timeout](auto ep) {
+    return parallel_for_each(live_nodes, [keyspace, cfname, &ms, timeout](auto ep) {
         return ser::storage_proxy_rpc_verbs::send_truncate(&ms, netw::messaging_service::msg_addr{ep, 0}, timeout, keyspace, cfname);
     }).handle_exception([cfname](auto ep) {
        try {
            std::rethrow_exception(ep);
        } catch (rpc::timeout_error& e) {
-           slogger.trace("Truncation of {} timed out: {}", cfname, e.what());
+           slogger.info("Truncation of {} timed out: {}", cfname, e.what());
            throw;
        } catch (...) {
            throw;
