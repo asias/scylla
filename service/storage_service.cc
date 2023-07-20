@@ -46,6 +46,7 @@
 #include "unimplemented.hh"
 #include "streaming/stream_plan.hh"
 #include "streaming/stream_state.hh"
+#include "streaming/stream_blob.hh"
 #include "dht/range_streamer.hh"
 #include <boost/range/adaptors.hpp>
 #include <boost/range/algorithm.hpp>
@@ -5211,6 +5212,19 @@ future<> storage_service::raft_check_and_repair_cdc_streams() {
 
 future<> storage_service::rebuild(sstring source_dc) {
     return run_with_api_lock(sstring("rebuild"), [source_dc] (storage_service& ss) -> future<> {
+        {
+            auto files = std::vector<sstring>{
+                "/tmp/tx1",
+                "/tmp/tx2",
+            };
+            auto targets = std::vector<gms::inet_address>{
+                gms::inet_address("127.0.0.2"),
+                gms::inet_address("127.0.0.3"),
+            };
+            co_await streaming::stream_files(ss._messaging.local(), files, targets);
+            co_return;
+        }
+
         if (ss._raft_topology_change_enabled) {
             co_await ss.raft_rebuild(source_dc);
         } else {

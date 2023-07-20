@@ -55,4 +55,21 @@ enum class stream_mutation_fragments_cmd : uint8_t {
     end_of_stream,
 };
 
+enum class stream_blob_cmd : uint8_t {
+    ok,
+    error,
+    data,
+    end_of_stream,
+};
+
+class stream_blob_data {
+    std::vector<uint8_t> data;
+};
+
+class stream_blob_meta {
+    utils::UUID ops_id;
+    utils::UUID table_id;
+    sstring filename;
+};
+
 }

@@ -32,6 +32,9 @@
 namespace streaming {
     class prepare_message;
     enum class stream_mutation_fragments_cmd : uint8_t;
+    enum class stream_blob_cmd : uint8_t;
+    class stream_blob_data;
+    class stream_blob_meta;
 }
 
 namespace gms {
@@ -183,7 +186,8 @@ enum class messaging_verb : int32_t {
     RAFT_TOPOLOGY_CMD = 64,
     RAFT_PULL_TOPOLOGY_SNAPSHOT = 65,
     TABLET_STREAM_DATA = 66,
-    LAST = 67,
+    STREAM_BLOB = 67,
+    LAST = 68,
 };
 
 } // namespace netw
@@ -367,6 +371,13 @@ public:
     future<> unregister_stream_mutation_fragments();
     rpc::sink<int32_t> make_sink_for_stream_mutation_fragments(rpc::source<frozen_mutation_fragment, rpc::optional<streaming::stream_mutation_fragments_cmd>>& source);
     future<std::tuple<rpc::sink<frozen_mutation_fragment, streaming::stream_mutation_fragments_cmd>, rpc::source<int32_t>>> make_sink_and_source_for_stream_mutation_fragments(table_schema_version schema_id, streaming::plan_id plan_id, table_id cf_id, uint64_t estimated_partitions, streaming::stream_reason reason, msg_addr id);
+
+    // Wrapper for STREAM_BLOB
+    // The receiver of STREAM_BLOB sends status code to the sender to notify any error on the receiver side. The status code is of type int32_t. 0 means successful, -1 means error, other status code value are reserved for future use.
+    void register_stream_blob(std::function<future<rpc::sink<streaming::stream_blob_cmd>> (const rpc::client_info& cinfo, streaming::stream_blob_meta meta, rpc::source<streaming::stream_blob_data, streaming::stream_blob_cmd> source)>&& func);
+    future<> unregister_stream_blob();
+    rpc::sink<streaming::stream_blob_cmd> make_sink_for_stream_blob(rpc::source<streaming::stream_blob_data, streaming::stream_blob_cmd>& source);
+    future<std::tuple<rpc::sink<streaming::stream_blob_data, streaming::stream_blob_cmd>, rpc::source<streaming::stream_blob_cmd>>> make_sink_and_source_for_stream_blob(streaming::stream_blob_meta meta, msg_addr id);
 
     // Wrapper for REPAIR_GET_ROW_DIFF_WITH_RPC_STREAM
     future<std::tuple<rpc::sink<repair_hash_with_cmd>, rpc::source<repair_row_on_wire_with_cmd>>> make_sink_and_source_for_repair_get_row_diff_with_rpc_stream(uint32_t repair_meta_id, msg_addr id);

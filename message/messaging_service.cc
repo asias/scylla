@@ -39,6 +39,7 @@
 #include "utils/digest_algorithm.hh"
 #include "streaming/stream_reason.hh"
 #include "streaming/stream_mutation_fragments_cmd.hh"
+#include "streaming/stream_blob.hh"
 #include "cache_temperature.hh"
 #include "raft/raft.hh"
 #include "service/raft/group0_fwd.hh"
@@ -579,6 +580,7 @@ static constexpr unsigned do_get_rpc_client_idx(messaging_verb verb) {
     case messaging_verb::UNUSED__REPLICATION_FINISHED:
     case messaging_verb::UNUSED__REPAIR_CHECKSUM_RANGE:
     case messaging_verb::STREAM_MUTATION_FRAGMENTS:
+    case messaging_verb::STREAM_BLOB:
     case messaging_verb::REPAIR_ROW_LEVEL_START:
     case messaging_verb::REPAIR_ROW_LEVEL_STOP:
     case messaging_verb::REPAIR_GET_FULL_ROW_HASHES:
@@ -987,6 +989,36 @@ void messaging_service::register_stream_mutation_fragments(std::function<future<
 
 future<> messaging_service::unregister_stream_mutation_fragments() {
     return unregister_handler(messaging_verb::STREAM_MUTATION_FRAGMENTS);
+}
+
+// stream blob
+rpc::sink<streaming::stream_blob_cmd> messaging_service::make_sink_for_stream_blob(rpc::source<streaming::stream_blob_data, streaming::stream_blob_cmd>& source) {
+    return source.make_sink<netw::serializer, streaming::stream_blob_cmd>();
+}
+
+future<std::tuple<rpc::sink<streaming::stream_blob_data, streaming::stream_blob_cmd>, rpc::source<streaming::stream_blob_cmd>>>
+messaging_service::make_sink_and_source_for_stream_blob(streaming::stream_blob_meta meta, msg_addr id) {
+    using value_type = std::tuple<rpc::sink<streaming::stream_blob_data, streaming::stream_blob_cmd>, rpc::source<streaming::stream_blob_cmd>>;
+    if (is_shutting_down()) {
+        return make_exception_future<value_type>(rpc::closed_error());
+    }
+    auto rpc_client = get_rpc_client(messaging_verb::STREAM_BLOB, id);
+    return rpc_client->make_stream_sink<netw::serializer, streaming::stream_blob_data, streaming::stream_blob_cmd>().then([this, meta, rpc_client] (rpc::sink<streaming::stream_blob_data, streaming::stream_blob_cmd> sink) mutable {
+        auto rpc_handler = rpc()->make_client<rpc::source<streaming::stream_blob_cmd> (streaming::stream_blob_meta, rpc::sink<streaming::stream_blob_data, streaming::stream_blob_cmd>)>(messaging_verb::STREAM_BLOB);
+        return rpc_handler(*rpc_client, meta, sink).then_wrapped([sink, rpc_client] (future<rpc::source<streaming::stream_blob_cmd>> source) mutable {
+            return (source.failed() ? sink.close() : make_ready_future<>()).then([sink = std::move(sink), source = std::move(source)] () mutable {
+                return make_ready_future<value_type>(value_type(std::move(sink), source.get0()));
+            });
+        });
+    });
+}
+
+void messaging_service::register_stream_blob(std::function<future<rpc::sink<streaming::stream_blob_cmd>> (const rpc::client_info& cinfo, streaming::stream_blob_meta meta, rpc::source<streaming::stream_blob_data, streaming::stream_blob_cmd> source)>&& func) {
+    register_handler(this, messaging_verb::STREAM_BLOB, std::move(func));
+}
+
+future<> messaging_service::unregister_stream_blob() {
+    return unregister_handler(messaging_verb::STREAM_BLOB);
 }
 
 template<class SinkType, class SourceType>
