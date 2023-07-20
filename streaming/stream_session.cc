@@ -21,6 +21,7 @@
 #include <seastar/core/sleep.hh>
 #include <seastar/core/thread.hh>
 #include "streaming/stream_state.hh"
+#include "streaming/stream_blob.hh"
 #include "streaming/stream_session_state.hh"
 #include "streaming/stream_exception.hh"
 #include "service/migration_manager.hh"
@@ -36,6 +37,8 @@
 #include "streaming/stream_mutation_fragments_cmd.hh"
 #include "consumer.hh"
 #include "readers/generating_v2.hh"
+#include <seastar/core/fstream.hh>
+#include "utils/pretty_printers.hh"
 
 namespace streaming {
 
@@ -110,6 +113,14 @@ void stream_manager::init_messaging_service_handler(abort_source& as) {
             session->follower_start_sent();
             return make_ready_future<>();
         });
+    });
+    ms.register_stream_blob([this] (const rpc::client_info& cinfo, streaming::stream_blob_meta meta, rpc::source<streaming::stream_blob_data, streaming::stream_blob_cmd> source) {
+        auto from = netw::messaging_service::get_source(cinfo).addr;
+        auto sink = _ms.local().make_sink_for_stream_blob(source);
+        (void)stream_blob_handler(_ms.local(), from, meta, sink, source).handle_exception([] (std::exception_ptr eptr) {
+            sslog.info("Failed to run stream blob handler: ", eptr);
+        });
+        return make_ready_future<rpc::sink<streaming::stream_blob_cmd>>(sink);
     });
     ms.register_stream_mutation_fragments([this, &as] (const rpc::client_info& cinfo, streaming::plan_id plan_id, table_schema_version schema_id, table_id cf_id, uint64_t estimated_partitions, rpc::optional<stream_reason> reason_opt, rpc::source<frozen_mutation_fragment, rpc::optional<stream_mutation_fragments_cmd>> source) {
         auto from = netw::messaging_service::get_source(cinfo);
@@ -234,6 +245,7 @@ future<> stream_manager::uninit_messaging_service_handler() {
         ms.unregister_prepare_message(),
         ms.unregister_prepare_done_message(),
         ms.unregister_stream_mutation_fragments(),
+        ms.unregister_stream_blob(),
         ms.unregister_stream_mutation_done(),
         ms.unregister_complete_message()).discard_result();
 }
