@@ -19,6 +19,12 @@
 #include <seastar/coroutine/all.hh>
 #include "utils/pretty_printers.hh"
 #include <cfloat>
+#include "replica/database.hh"
+#include "sstables/sstables.hh"
+#include "sstables/sstables_manager.hh"
+#include "sstables/sstable_version.hh"
+#include <filesystem>
+
 
 namespace streaming {
 
@@ -29,14 +35,15 @@ static utils::pretty_printed_throughput get_bw(size_t total_size, std::chrono::s
     return utils::pretty_printed_throughput(total_size, duration);
 }
 
-sstring get_dest_file_name() {
-    // TODO: we need to get a real path for the destination
-    auto uuid = utils::make_random_uuid();
-    auto filename = "/tmp/rx-" + uuid.to_sstring();
-    return filename;
+sstring get_dest_file_name(replica::database& db, const streaming::stream_blob_meta& meta) {
+    auto path = std::filesystem::path(meta.filename);
+    auto& table = db.find_column_family(meta.table);
+    auto filename = std::filesystem::path(table.dir()) / path.filename();
+    blogger.info("table_dir={} filename={} ret={}", table.dir(), path.filename(), filename);
+    return filename.string();
 }
 
-future<> stream_blob_handler(netw::messaging_service& ms,
+future<> stream_blob_handler(replica::database& db, netw::messaging_service& ms,
         gms::inet_address from,
         streaming::stream_blob_meta meta,
         rpc::sink<streaming::stream_blob_cmd> sink,
@@ -51,7 +58,8 @@ future<> stream_blob_handler(netw::messaging_service& ms,
     try {
         blogger.info("fstream[{}] Follower started peer={} file={}",
                 meta.ops_id, from, meta.filename);
-        auto file = co_await open_file_dma(get_dest_file_name(), open_flags::wo | open_flags::create);
+        auto dst_filename = get_dest_file_name(db, meta);
+        auto file = co_await open_file_dma(dst_filename, open_flags::wo | open_flags::create);
         fstream = co_await make_file_output_stream(std::move(file));
         for (;;) {
             auto opt = co_await source();
@@ -77,6 +85,28 @@ future<> stream_blob_handler(netw::messaging_service& ms,
         co_await fstream->flush();
         co_await fstream->close();
         fstream_closed = true;
+
+        // The sender sends TOC file in the end of the sstable component files.
+        // When TOC file is received, the other sstable component files should
+        // have been recevied. Load the received sstable to the main sstable
+        // dataset.
+        auto toc = sstables::sstable_version_constants::TOC_SUFFIX;
+        auto data = sstring("Data.db");
+        auto it = dst_filename.find(toc);
+        if (it != sstring::npos) {
+            auto data_filename = dst_filename;
+            //data_filename.replace(it, toc.size(), data.c_str(), data.size());
+            auto data_path = std::filesystem::path(data_filename).filename();
+            blogger.info("fstream[{}] Started loading sst {}", meta.ops_id, data_filename);
+            auto& table = db.find_column_family(meta.table);
+            auto desc = sstables::entry_descriptor::make_descriptor(table.dir(), data_path.string(), table.schema()->ks_name(), table.schema()->cf_name());
+#if 0
+            co_await table.load_sstable_and_update_cache(desc);
+#else
+            co_await replica::database::load_sstable_for_tablet(db.container(), table.schema(), desc);
+#endif
+            blogger.info("fstream[{}] Finished loading sst {}", meta.ops_id, data_filename);
+        }
 
         // Send status code and close the sink
         co_await sink(streaming::stream_blob_cmd::ok);
@@ -121,16 +151,16 @@ future<> stream_blob_handler(netw::messaging_service& ms,
     co_return;
 }
 
-future<> stream_files(netw::messaging_service& ms, std::vector<seastar::sstring> files, std::vector<gms::inet_address> targets) {
+future<> stream_files(netw::messaging_service& ms, std::list<seastar::sstring> files, std::vector<gms::inet_address> targets, table_id table, utils::UUID ops_id) {
     if (targets.empty()) {
         co_return;
     }
     if (files.empty()) {
         co_return;
     }
-    auto uuid = utils::make_random_uuid();
 
-    blogger.info("fstream[{}] Master started files={}, targets={}", uuid, files, targets);
+    blogger.info("fstream[{}] Master started sending files_nr={}, files={}, targets={}",
+            ops_id, files.size(), files, targets);
 
     struct sink_and_source {
         gms::inet_address node;
@@ -143,7 +173,8 @@ future<> stream_files(netw::messaging_service& ms, std::vector<seastar::sstring>
     auto ops_start_time = std::chrono::steady_clock::now();
     size_t ops_total_size = 0;
     streaming::stream_blob_meta meta;
-    meta.ops_id = uuid;
+    meta.ops_id = ops_id;
+    meta.table = table;
     std::exception_ptr error;
 
     for (auto& filename : files) {
@@ -154,7 +185,7 @@ future<> stream_files(netw::messaging_service& ms, std::vector<seastar::sstring>
             fstream = make_file_input_stream(std::move(file));
         } catch (...) {
             blogger.info("fstream[{}] Master failed file={} targets={} error={}",
-                uuid, files, targets, std::current_exception());
+                ops_id, files, targets, std::current_exception());
             throw;
         }
 
@@ -165,7 +196,7 @@ future<> stream_files(netw::messaging_service& ms, std::vector<seastar::sstring>
         bool got_error_from_peer = false;
         try {
             for (auto& node : targets) {
-                blogger.debug("fstream[{}] Master creating sink and source for node={}, file={}, targets={}", uuid, node, filename, targets);
+                blogger.debug("fstream[{}] Master creating sink and source for node={}, file={}, targets={}", ops_id, node, filename, targets);
                 auto [sink, source] = co_await ms.make_sink_and_source_for_stream_blob(meta, netw::messaging_service::msg_addr(node));
                 ss.push_back(sink_and_source{node, std::move(sink), std::move(source)});
             }
@@ -185,7 +216,7 @@ future<> stream_files(netw::messaging_service& ms, std::vector<seastar::sstring>
                         total_size += sz;
                         ops_total_size += sz;
                         blogger.trace("fstream[{}] Master sending file={} to node={} chunk_size={}",
-                            uuid, filename, s.node, data.data.size());
+                            ops_id, filename, s.node, data.data.size());
                         co_await s.sink(data, streaming::stream_blob_cmd::data);
                     });
                 }
@@ -196,7 +227,7 @@ future<> stream_files(netw::messaging_service& ms, std::vector<seastar::sstring>
                 }
 
                 for (auto& s : ss) {
-                    blogger.debug("fstream[{}] Master done sending file={} to node={}", uuid, filename, s.node);
+                    blogger.debug("fstream[{}] Master done sending file={} to node={}", ops_id, filename, s.node);
                     co_await s.sink(streaming::stream_blob_data{}, streaming::stream_blob_cmd::end_of_stream);
                     s.status_sent = true;
                     co_await s.sink.close();
@@ -216,7 +247,7 @@ future<> stream_files(netw::messaging_service& ms, std::vector<seastar::sstring>
                                 got_error_from_peer = true;
                             }
                             blogger.debug("fstream[{}] Master got stream_blob_cmd={} file={} peer={}",
-                                    uuid, int(status), filename, s.node);
+                                    ops_id, int(status), filename, s.node);
                         } else {
                             break;
                         }
@@ -231,7 +262,7 @@ future<> stream_files(netw::messaging_service& ms, std::vector<seastar::sstring>
         }
         if (error) {
             blogger.warn("fstream[{}] Master failed sending file={} to targets={} send_size={} bw={} error={}",
-                    uuid, filename, targets, total_size, get_bw(total_size, start_time), error);
+                    ops_id, filename, targets, total_size, get_bw(total_size, start_time), error);
             // Error handling for fstream and sink
             if (!fstream_closed) {
                 try {
@@ -268,17 +299,45 @@ future<> stream_files(netw::messaging_service& ms, std::vector<seastar::sstring>
             break;
         } else {
             blogger.info("fstream[{}] Master done sending file={} to targets={} send_size={} bw={}",
-                    uuid, filename, targets, total_size, get_bw(total_size, start_time));
+                    ops_id, filename, targets, total_size, get_bw(total_size, start_time));
         }
     }
     if (error) {
-        blogger.info("fstream[{}] Master failed files={} targets={} send_size={} bw={} error={}",
-                uuid, files, targets, ops_total_size, get_bw(ops_total_size, ops_start_time), error);
+        blogger.info("fstream[{}] Master failed sending files_nr={}, files={} targets={} send_size={} bw={} error={}",
+                ops_id, files.size(), files, targets, ops_total_size, get_bw(ops_total_size, ops_start_time), error);
         std::rethrow_exception(error);
     } else {
-        blogger.info("fstream[{}] Master finished files={} targets={} send_size={} bw={}",
-                uuid, files, targets, ops_total_size, get_bw(ops_total_size, ops_start_time));
+        blogger.info("fstream[{}] Master finished sending files_nr={}, files={} targets={} send_size={} bw={}",
+                ops_id, files.size(), files, targets, ops_total_size, get_bw(ops_total_size, ops_start_time));
     }
+    co_return;
+}
+
+
+future<> stream_sstables(replica::database& db, netw::messaging_service& ms, streaming::stream_files_request req) {
+    auto& table = db.find_column_family(req.table);
+    auto sstables = co_await table.take_storage_snapshot(req.range);
+    auto files = std::list<sstring>();
+    for (auto& sst : sstables) {
+        auto components = std::list<sstring>();
+        for (auto& c : sst->component_filenames()) {
+            co_await coroutine::maybe_yield();
+            // Put TOC file at the end of the file list for a given sstable
+            if (c.find(sstables::sstable_version_constants::TOC_SUFFIX) != sstring::npos) {
+                components.push_back(c);
+            } else {
+                components.push_front(c);
+            }
+        }
+        for (auto& c : components) {
+            files.push_back(c);
+        }
+    }
+    blogger.info("stream_sstables[{}] Started sending sstable_nr={} files_nr={}, files={} range={}",
+            req.ops_id, sstables.size(), files.size(), files, req.range);
+    co_await stream_files(ms, files, req.targets, req.table, req.ops_id);
+    blogger.info("stream_sstables[{}] Finished sending sstable_nr={} files_nr={}, files={} range={}",
+            req.ops_id, sstables.size(), files.size(), files, req.range);
     co_return;
 }
 

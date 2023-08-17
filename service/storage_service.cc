@@ -81,6 +81,7 @@
 #include "utils/fb_utilities.hh"
 #include "locator/util.hh"
 #include "idl/storage_service.dist.hh"
+#include "idl/streaming.dist.hh"
 #include "service/storage_proxy.hh"
 #include "service/raft/raft_address_map.hh"
 #include "protocol_server.hh"
@@ -5203,7 +5204,24 @@ future<> storage_service::raft_check_and_repair_cdc_streams() {
 future<> storage_service::rebuild(sstring source_dc) {
     return run_with_api_lock(sstring("rebuild"), [source_dc] (storage_service& ss) -> future<> {
         {
-            auto files = std::vector<sstring>{
+            auto& db = ss._db.local();
+            //auto& table = db.find_column_family("ks2", "standard1");
+            auto& table = db.find_column_family("ks1a", "tb");
+            streaming::stream_files_request req;
+            auto range = dht::token_range::make({dht::minimum_token(), false}, {dht::maximum_token(), false});
+            auto node = gms::inet_address("127.0.0.2");
+            req.ops_id = utils::make_random_uuid();
+            req.keyspace_name = table.schema()->ks_name(),
+            req.table_name = table.schema()->cf_name();
+            req.table = table.schema()->id();
+            req.range = range;
+            req.targets = std::vector<gms::inet_address>{ss.get_broadcast_address()};
+            co_await ser::streaming_rpc_verbs::send_tablet_stream_files(&ss._messaging.local(), netw::msg_addr(node), ss._abort_source, req);
+            co_return;
+        }
+
+        {
+            auto files = std::list<sstring>{
                 "/tmp/tx1",
                 "/tmp/tx2",
             };
@@ -5211,7 +5229,8 @@ future<> storage_service::rebuild(sstring source_dc) {
                 gms::inet_address("127.0.0.2"),
                 gms::inet_address("127.0.0.3"),
             };
-            co_await streaming::stream_files(ss._messaging.local(), files, targets);
+            auto uuid = utils::make_random_uuid();
+            co_await streaming::stream_files(ss._messaging.local(), files, targets, table_id(), uuid);
             co_return;
         }
 
@@ -6005,25 +6024,42 @@ future<> storage_service::stream_tablet(locator::global_tablet_id tablet) {
         _tablet_streaming.erase(tablet);
     });
 
+    auto ops_id = utils::make_random_uuid();
     try {
+        bool use_file_stream = true;
         auto& table = _db.local().find_column_family(tablet.table);
-        std::vector<sstring> tables = {table.schema()->cf_name()};
-        auto streamer = make_lw_shared<dht::range_streamer>(_db, _stream_manager, tm, _abort_source,
-               get_broadcast_address(), _sys_ks.local().local_dc_rack(),
-               "Tablet migration", streaming::stream_reason::tablet_migration, std::move(tables));
-        streamer->add_source_filter(std::make_unique<dht::range_streamer::failure_detector_source_filter>(
-                _gossiper.get_unreachable_members()));
+        slogger.info("Streaming for tablet migration of {} started use_file_stream={}, ks={}, table={}, range={}, ops_id={}",
+                tablet, use_file_stream, table.schema()->ks_name(), table.schema()->cf_name(), range, ops_id);
+        if (use_file_stream) {
+            streaming::stream_files_request req;
+            req.ops_id = ops_id;
+            req.keyspace_name = table.schema()->ks_name(),
+            req.table_name = table.schema()->cf_name();
+            req.table = table.schema()->id();
+            req.range = range;
+            req.targets = std::vector<gms::inet_address>{get_broadcast_address()};
+            co_await ser::streaming_rpc_verbs::send_tablet_stream_files(&_messaging.local(), netw::msg_addr(leaving_replica_ip), _abort_source, req);
 
-        std::unordered_map<inet_address, dht::token_range_vector> ranges_per_endpoint;
-        ranges_per_endpoint[leaving_replica_ip].emplace_back(range);
-        streamer->add_rx_ranges(table.schema()->ks_name(), std::move(ranges_per_endpoint));
-        co_await streamer->stream_async();
+            p.set_value();
+        } else {
+            std::vector<sstring> tables = {table.schema()->cf_name()};
+            auto streamer = make_lw_shared<dht::range_streamer>(_db, _stream_manager, tm, _abort_source,
+                   get_broadcast_address(), _sys_ks.local().local_dc_rack(),
+                   "Tablet migration", streaming::stream_reason::tablet_migration, std::move(tables));
+            streamer->add_source_filter(std::make_unique<dht::range_streamer::failure_detector_source_filter>(
+                    _gossiper.get_unreachable_members()));
 
-        p.set_value();
-        slogger.info("Streaming for tablet migration of {} successful", tablet);
+            std::unordered_map<inet_address, dht::token_range_vector> ranges_per_endpoint;
+            ranges_per_endpoint[leaving_replica_ip].emplace_back(range);
+            streamer->add_rx_ranges(table.schema()->ks_name(), std::move(ranges_per_endpoint));
+            co_await streamer->stream_async();
+
+            p.set_value();
+        }
+        slogger.info("Streaming for tablet migration of {} successful ops_id={}", tablet, ops_id);
     } catch (...) {
         p.set_exception(std::current_exception());
-        slogger.warn("Streaming for tablet migration of {} from {} failed: {}", tablet, leaving_replica, std::current_exception());
+        slogger.warn("Streaming for tablet migration of {} from {} failed ops_id={}: {}", tablet, leaving_replica, ops_id, std::current_exception());
         throw;
     }
 }
@@ -6094,12 +6130,30 @@ void storage_service::init_messaging_service(sharded<service::storage_proxy>& pr
     ser::storage_service_rpc_verbs::register_tablet_stream_data(&_messaging.local(), [this] (locator::global_tablet_id tablet) {
         return stream_tablet(tablet);
     });
+    ser::streaming_rpc_verbs::register_tablet_stream_files(&_messaging.local(), [this] (const rpc::client_info& cinfo, streaming::stream_files_request req) -> future<> {
+#if 0
+        auto& db = proxy.local().get_db().local();
+        auto& ms = _messaging.local();
+        co_await streaming::stream_sstables(db, ms, req);
+        co_return;
+#else
+        co_await container().invoke_on_all([req] (storage_service& ss) -> future<> {
+            slogger.info("stream_sstables[{}] Run streaming::stream_sstables on shard {}", req.ops_id, this_shard_id());
+            auto& db = ss._db.local();
+            auto& ms = ss._messaging.local();
+            co_await streaming::stream_sstables(db, ms, req);
+            co_return;
+        });
+        co_return;
+#endif
+    });
 }
 
 future<> storage_service::uninit_messaging_service() {
     return when_all_succeed(
         _messaging.local().unregister_node_ops_cmd(),
-        ser::storage_service_rpc_verbs::unregister(&_messaging.local())
+        ser::storage_service_rpc_verbs::unregister(&_messaging.local()),
+        ser::streaming_rpc_verbs::unregister_tablet_stream_files(&_messaging.local())
     ).discard_result();
 }
 
