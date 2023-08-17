@@ -43,8 +43,8 @@ async def test_bootstrap(manager: ManagerClient):
     keys = range(256)
     await asyncio.gather(*[cql.run_async(f"INSERT INTO test.test (pk, c) VALUES ({k}, {k});") for k in keys])
 
-    # for s in servers:
-    #     await manager.server_restart(s.server_id)
+    for s in servers:
+        await manager.server_restart(s.server_id)
 
     async def check():
         logger.info("Checking table")
@@ -55,12 +55,16 @@ async def test_bootstrap(manager: ManagerClient):
 
     await inject_error_on(manager, "tablet_allocator_shuffle", servers)
 
-    logger.info("Adding new server")
+    logger.info("Adding new server 3")
     await manager.server_add()
+
+    #logger.info("Restart before check")
+    # for s in servers:
+    #     await manager.server_restart(s.server_id)
 
     await check()
 
-    logger.info("Adding new server")
+    logger.info("Adding new server 4")
     await manager.server_add()
 
     await check()

@@ -117,7 +117,7 @@ void stream_manager::init_messaging_service_handler(abort_source& as) {
     ms.register_stream_blob([this] (const rpc::client_info& cinfo, streaming::stream_blob_meta meta, rpc::source<streaming::stream_blob_data, streaming::stream_blob_cmd> source) {
         auto from = netw::messaging_service::get_source(cinfo).addr;
         auto sink = _ms.local().make_sink_for_stream_blob(source);
-        (void)stream_blob_handler(_ms.local(), from, meta, sink, source).handle_exception([] (std::exception_ptr eptr) {
+        (void)stream_blob_handler(_db.local(), _ms.local(), from, meta, sink, source).handle_exception([] (std::exception_ptr eptr) {
             sslog.info("Failed to run stream blob handler: ", eptr);
         });
         return make_ready_future<rpc::sink<streaming::stream_blob_cmd>>(sink);

@@ -186,8 +186,9 @@ enum class messaging_verb : int32_t {
     RAFT_TOPOLOGY_CMD = 64,
     RAFT_PULL_TOPOLOGY_SNAPSHOT = 65,
     TABLET_STREAM_DATA = 66,
-    STREAM_BLOB = 67,
-    LAST = 68,
+    TABLET_STREAM_FILES = 67,
+    STREAM_BLOB = 68,
+    LAST = 69,
 };
 
 } // namespace netw

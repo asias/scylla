@@ -68,8 +68,19 @@ class stream_blob_data {
 
 class stream_blob_meta {
     utils::UUID ops_id;
-    utils::UUID table_id;
+    table_id table;
     sstring filename;
 };
+
+class stream_files_request {
+    utils::UUID ops_id;
+    sstring keyspace_name;
+    sstring table_name;
+    table_id table;
+    dht::token_range range;
+    std::vector<gms::inet_address> targets;
+};
+
+verb [[with_client_info, cancellable]] tablet_stream_files (streaming::stream_files_request req);
 
 }

@@ -11,10 +11,16 @@
 #include "message/messaging_service_fwd.hh"
 #include <cstdint>
 #include <vector>
+#include <list>
 #include <seastar/core/sstring.hh>
 #include <seastar/core/future.hh>
 #include <seastar/rpc/rpc_types.hh>
 #include "utils/UUID.hh"
+#include "dht/i_partitioner.hh"
+
+namespace replica {
+    class database;
+}
 
 namespace streaming {
 
@@ -33,13 +39,28 @@ public:
 class stream_blob_meta {
 public:
     utils::UUID ops_id;
-    utils::UUID table_id;
+    table_id table;
     sstring filename;
 };
 
 // Send files in the files list to the nodes in targets list over network
-seastar::future<> stream_files(netw::messaging_service& ms, std::vector<seastar::sstring> files, std::vector<gms::inet_address> targets);
+seastar::future<> stream_files(netw::messaging_service& ms, std::list<seastar::sstring> files, std::vector<gms::inet_address> targets, table_id table, utils::UUID uuid);
 
-seastar::future<> stream_blob_handler(netw::messaging_service& ms, gms::inet_address from, streaming::stream_blob_meta meta, rpc::sink<streaming::stream_blob_cmd> sink, rpc::source<streaming::stream_blob_data, streaming::stream_blob_cmd> source);
+seastar::future<> stream_blob_handler(replica::database& db, netw::messaging_service& ms, gms::inet_address from, streaming::stream_blob_meta meta, rpc::sink<streaming::stream_blob_cmd> sink, rpc::source<streaming::stream_blob_data, streaming::stream_blob_cmd> source);
+
+
+
+class stream_files_request {
+public:
+    utils::UUID ops_id;
+    sstring keyspace_name;
+    sstring table_name;
+    table_id table;
+    dht::token_range range;
+    std::vector<gms::inet_address> targets;
+};
+
+
+future<> stream_sstables(replica::database& db, netw::messaging_service& ms, streaming::stream_files_request req);
 
 }

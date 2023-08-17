@@ -440,6 +440,7 @@ future<sstables::shared_sstable> table::load_sstable_and_update_cache(sstables::
     auto newtab = sstm.make_sstable(_schema, _config.datadir, *_storage_opts, desc.generation, sstables::sstable_state::normal, desc.version, desc.format);
     auto& sharder = get_effective_replication_map()->get_sharder(*_schema);
     co_await newtab->load(sharder);
+    tlogger.info("load: sst={}, shards={}", newtab->get_filename(), newtab->get_shards_for_this_sstable());
     co_await add_sstable_and_update_cache(newtab);
     co_return newtab;
 }
