@@ -435,6 +435,15 @@ sstables::shared_sstable table::make_sstable(sstables::sstable_state state) {
     return sstm.make_sstable(_schema, _config.datadir, *_storage_opts, calculate_generation_for_new_table(), state, sstm.get_highest_supported_format(), sstables::sstable::format_types::big);
 }
 
+future<sstables::shared_sstable> table::load_sstable_and_update_cache(sstables::entry_descriptor desc) {
+    auto& sstm = get_sstables_manager();
+    auto newtab = sstm.make_sstable(_schema, _config.datadir, *_storage_opts, desc.generation, sstables::sstable_state::normal, desc.version, desc.format);
+    auto& sharder = get_effective_replication_map()->get_sharder(*_schema);
+    co_await newtab->load(sharder);
+    co_await add_sstable_and_update_cache(newtab);
+    co_return newtab;
+}
+
 sstables::shared_sstable table::make_sstable() {
     return make_sstable(sstables::sstable_state::normal);
 }
