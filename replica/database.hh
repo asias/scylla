@@ -60,6 +60,7 @@
 #include "absl-flat_hash_map.hh"
 #include "utils/cross-shard-barrier.hh"
 #include "sstables/generation_type.hh"
+#include "sstables/open_info.hh"
 #include "db/rate_limiter.hh"
 #include "db/operation_type.hh"
 #include "utils/serialized_action.hh"
@@ -508,7 +509,9 @@ public:
 
     future<> add_sstable_and_update_cache(sstables::shared_sstable sst,
                                           sstables::offstrategy offstrategy = sstables::offstrategy::no);
+    future<sstables::shared_sstable> load_sstable_and_update_cache(sstables::entry_descriptor desc);
     future<> add_sstables_and_update_cache(const std::vector<sstables::shared_sstable>& ssts);
+
     future<> move_sstables_from_staging(std::vector<sstables::shared_sstable>);
     sstables::shared_sstable make_sstable();
     void cache_truncation_record(db_clock::time_point truncated_at) {
