@@ -1810,6 +1810,8 @@ public:
     }
 
     bool is_user_semaphore(const reader_concurrency_semaphore& semaphore) const;
+
+    static future<> load_sstable_for_tablet(sharded<database>& db, const schema_ptr& s, sstables::entry_descriptor desc);
 };
 
 } // namespace replica
