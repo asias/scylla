@@ -39,7 +39,7 @@ sstring get_dest_file_name(replica::database& db, const streaming::stream_blob_m
     auto path = std::filesystem::path(meta.filename);
     auto& table = db.find_column_family(meta.table);
     auto filename = std::filesystem::path(table.dir()) / path.filename();
-    blogger.info("table_dir={} filename={} ret={}", table.dir(), path.filename(), filename);
+    blogger.debug("table_dir={} filename={} ret={}", table.dir(), path.filename(), filename);
     return filename.string();
 }
 
@@ -91,13 +91,10 @@ future<> stream_blob_handler(replica::database& db, netw::messaging_service& ms,
         // have been recevied. Load the received sstable to the main sstable
         // dataset.
         auto toc = sstables::sstable_version_constants::TOC_SUFFIX;
-        auto data = sstring("Data.db");
         auto it = dst_filename.find(toc);
         if (it != sstring::npos) {
-            auto data_filename = dst_filename;
-            //data_filename.replace(it, toc.size(), data.c_str(), data.size());
-            auto data_path = std::filesystem::path(data_filename).filename();
-            blogger.info("fstream[{}] Started loading sst {}", meta.ops_id, data_filename);
+            auto data_path = std::filesystem::path(dst_filename).filename();
+            blogger.info("fstream[{}] Started loading sst {}", meta.ops_id, dst_filename);
             auto& table = db.find_column_family(meta.table);
             auto desc = sstables::entry_descriptor::make_descriptor(table.dir(), data_path.string(), table.schema()->ks_name(), table.schema()->cf_name());
 #if 0
@@ -105,7 +102,7 @@ future<> stream_blob_handler(replica::database& db, netw::messaging_service& ms,
 #else
             co_await replica::database::load_sstable_for_tablet(db.container(), table.schema(), desc);
 #endif
-            blogger.info("fstream[{}] Finished loading sst {}", meta.ops_id, data_filename);
+            blogger.info("fstream[{}] Finished loading sst {}", meta.ops_id, dst_filename);
         }
 
         // Send status code and close the sink

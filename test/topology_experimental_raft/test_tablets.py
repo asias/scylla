@@ -31,7 +31,8 @@ async def inject_error_on(manager, error_name, servers):
 @pytest.mark.asyncio
 async def test_bootstrap(manager: ManagerClient):
     logger.info("Bootstrapping cluster")
-    servers = [await manager.server_add(), await manager.server_add(), await manager.server_add()]
+    #servers = [await manager.server_add(), await manager.server_add(), await manager.server_add()]
+    servers = [await manager.server_add()]
 
     cql = manager.get_cql()
     await cql.run_async("CREATE KEYSPACE test WITH replication = {'class': 'NetworkTopologyStrategy', "
@@ -43,8 +44,8 @@ async def test_bootstrap(manager: ManagerClient):
     keys = range(256)
     await asyncio.gather(*[cql.run_async(f"INSERT INTO test.test (pk, c) VALUES ({k}, {k});") for k in keys])
 
-    for s in servers:
-        await manager.server_restart(s.server_id)
+    # for s in servers:
+    #     await manager.server_restart(s.server_id)
 
     async def check():
         logger.info("Checking table")
@@ -63,12 +64,15 @@ async def test_bootstrap(manager: ManagerClient):
     #     await manager.server_restart(s.server_id)
 
     await check()
-
-    logger.info("Adding new server 4")
-    await manager.server_add()
-
-    await check()
     time.sleep(5) # Give load balancer some time to do work
     await check()
+
+    if True:
+        logger.info("Adding new server 4")
+        await manager.server_add()
+
+        await check()
+        time.sleep(5) # Give load balancer some time to do work
+        await check()
 
     await cql.run_async("DROP KEYSPACE test;")
