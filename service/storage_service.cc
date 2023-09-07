@@ -6168,10 +6168,11 @@ void storage_service::init_messaging_service(sharded<service::storage_proxy>& pr
         co_return;
 #else
         co_await container().invoke_on_all([req] (storage_service& ss) -> future<> {
-            slogger.info("stream_sstables[{}] Run streaming::stream_sstables on shard {}", req.ops_id, this_shard_id());
+            slogger.info("stream_sstables[{}] Started stream_sstables on shard {}", req.ops_id, this_shard_id());
             auto& db = ss._db.local();
             auto& ms = ss._messaging.local();
             co_await streaming::stream_sstables(db, ms, req);
+            slogger.info("stream_sstables[{}] Finished stream_sstables on shard {}", req.ops_id, this_shard_id());
             co_return;
         });
         co_return;

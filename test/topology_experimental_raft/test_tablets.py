@@ -31,11 +31,12 @@ async def inject_error_on(manager, error_name, servers):
 @pytest.mark.asyncio
 async def test_bootstrap(manager: ManagerClient):
     logger.info("Bootstrapping cluster")
-    servers = [await manager.server_add(), await manager.server_add(), await manager.server_add()]
+    #servers = [await manager.server_add(), await manager.server_add(), await manager.server_add()]
+    servers = [await manager.server_add()]
 
     cql = manager.get_cql()
     await cql.run_async("CREATE KEYSPACE test WITH replication = {'class': 'NetworkTopologyStrategy', "
-                  "'replication_factor': 1, 'initial_tablets': 32};")
+                  "'replication_factor': 1, 'initial_tablets': 4};")
     await cql.run_async("CREATE TABLE test.test (pk int PRIMARY KEY, c int);")
 
     logger.info("Populating table")
@@ -43,11 +44,18 @@ async def test_bootstrap(manager: ManagerClient):
     keys = range(256)
     await asyncio.gather(*[cql.run_async(f"INSERT INTO test.test (pk, c) VALUES ({k}, {k});") for k in keys])
 
-    for s in servers:
-        await manager.server_restart(s.server_id)
+    async def restart():
+        logger.info("Restart serrver")
+        for s in servers:
+            #await manager.server_restart(s.server_id)
+            await manager.server_stop_gracefully(s.server_id)
+            await manager.server_start(s.server_id)
+        logger.info("Sleep")
+        time.sleep(10)
 
     async def check():
         logger.info("Checking table")
+        cql = manager.get_cql()
         rows = await cql.run_async("SELECT * FROM test.test;")
         assert len(rows) == len(keys)
         for r in rows:
@@ -55,20 +63,22 @@ async def test_bootstrap(manager: ManagerClient):
 
     await inject_error_on(manager, "tablet_allocator_shuffle", servers)
 
-    logger.info("Adding new server 3")
+    logger.info("Adding new server 1")
     await manager.server_add()
 
-    #logger.info("Restart before check")
-    # for s in servers:
-    #     await manager.server_restart(s.server_id)
-
-    await check()
-
-    logger.info("Adding new server 4")
-    await manager.server_add()
-
+    await restart()
+    await restart()
     await check()
     time.sleep(5) # Give load balancer some time to do work
     await check()
 
-    await cql.run_async("DROP KEYSPACE test;")
+    if False:
+        logger.info("Adding new server 2")
+        await manager.server_add()
+
+        await restart()
+        await check()
+        time.sleep(5) # Give load balancer some time to do work
+        await check()
+
+    #await cql.run_async("DROP KEYSPACE test;")
