@@ -3016,6 +3016,38 @@ void database::unplug_view_update_generator() noexcept {
     _view_update_generator = nullptr;
 }
 
+future<> database::load_sstable_for_tablet(sharded<database>& db, const schema_ptr& s, sstables::entry_descriptor desc) {
+    auto make_sstable = [id = s->id()] (database& db, sstables::entry_descriptor desc) {
+        replica::table& t = db.find_column_family(id);
+        auto& sstm = t.get_sstables_manager();
+        return sstm.make_sstable(t.schema(), t.dir(), t.get_storage_options(), desc.generation, sstables::sstable_state::normal, desc.version, desc.format);
+    };
+    auto get_sharder = [id = s->id()] (database& db) {
+        replica::table& t = db.find_column_family(id);
+        return t.get_effective_replication_map()->get_sharder(*t.schema());
+    };
+
+    auto sst = make_sstable(db.local(), desc);
+    co_await sst->load_owner_shards(get_sharder(db.local()));
+    auto& shards = sst->get_shards_for_this_sstable();
+
+    // assumes tablet migration splits the sstable before sending it to new owner, meaning the sstable spans a single tablet.
+    if (shards.size() > 1) {
+        throw std::runtime_error(format("SSTable {} is owned by more than one shard", sst->get_filename()));
+    }
+
+    co_await db.invoke_on(shards[0], [id = s->id(), desc, make_sstable, get_sharder] (database& db) -> future<> {
+        auto sst = make_sstable(db, desc);
+        co_await sst->load(get_sharder(db));
+
+        replica::table& t = db.find_column_family(id);
+        co_await t.add_sstable_and_update_cache(sst);
+    });
+
+    dblog.info("Loaded sstable {} at shard {} successfully.", sst->get_filename(), shards[0]);
+}
+
+
 } // namespace replica
 
 flat_mutation_reader_v2 make_multishard_streaming_reader(distributed<replica::database>& db,
