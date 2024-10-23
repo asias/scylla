@@ -271,6 +271,7 @@ future<> db::batchlog_manager::replay_all_failed_batches(post_replay_cleanup cle
     co_await seastar::with_gate(_gate, [this, cleanup, batch = std::move(batch)] () mutable -> future<> {
         blogger.debug("Started replayAllFailedBatches (cpu {})", this_shard_id());
         co_await utils::get_local_injector().inject("add_delay_to_batch_replay", std::chrono::milliseconds(1000));
+        co_await sleep_abortable(std::chrono::milliseconds(5000), _stop);
         co_await _qp.query_internal(
                 format("SELECT id, data, written_at, version FROM {}.{} BYPASS CACHE", system_keyspace::NAME, system_keyspace::BATCHLOG),
                 db::consistency_level::ONE,
