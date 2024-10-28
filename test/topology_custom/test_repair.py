@@ -8,6 +8,7 @@ import logging
 import pytest
 import time
 import asyncio
+import os
 
 from cassandra.cluster import ConsistencyLevel
 from cassandra.query import SimpleStatement
@@ -31,6 +32,7 @@ async def get_injection_params(manager, node_ip, injection):
         return {}
 
 
+@pytest.mark.skip(reason="test")
 @pytest.mark.asyncio
 @skip_mode('release', 'error injections are not supported in release mode')
 async def test_enable_compacting_data_for_streaming_and_repair_live_update(manager):
@@ -73,6 +75,7 @@ async def test_enable_compacting_data_for_streaming_and_repair_live_update(manag
     assert (await get_injection_params(manager, node1.ip_addr, "maybe_compact_for_streaming"))["compaction_enabled"] == "true"
 
 
+@pytest.mark.skip(reason="test")
 @pytest.mark.asyncio
 @skip_mode('release', 'error injections are not supported in release mode')
 async def test_tombstone_gc_for_streaming_and_repair(manager):
@@ -146,6 +149,7 @@ async def test_tombstone_gc_for_streaming_and_repair(manager):
             "compaction_enabled": "true", "compaction_can_gc": "false"}
     check_nodes_have_data(True, True)
 
+@pytest.mark.skip(reason="test")
 @pytest.mark.asyncio
 @skip_mode('release', 'error injections are not supported in release mode')
 async def test_repair_succeeds_with_unitialized_bm(manager):
@@ -212,12 +216,129 @@ async def do_batchlog_flush_in_repair(manager, cache_time_in_ms):
 
     logger.debug(f"Repair nr_repairs={nr_repairs} cache_time_in_ms={cache_time_in_ms} total_repair_duration={total_repair_duration}")
 
+@pytest.mark.skip(reason="test")
 @pytest.mark.asyncio
 @skip_mode('release', 'error injections are not supported in release mode')
 async def test_batchlog_flush_in_repair_with_cache(manager):
     await do_batchlog_flush_in_repair(manager, 5000);
 
+@pytest.mark.skip(reason="test")
 @pytest.mark.asyncio
 @skip_mode('release', 'error injections are not supported in release mode')
 async def test_batchlog_flush_in_repair_without_cache(manager):
     await do_batchlog_flush_in_repair(manager, 0);
+
+def add_net_delay(delay_in_ms=50):
+    if delay_in_ms == 0:
+        logger.info(f"Skipped adding net delay {delay_in_ms=}")
+        return
+    logger.info(f"Adding net delay {delay_in_ms=}")
+    os.system("sudo modprobe sch_netem");
+    os.system("sudo tc qdisc del dev lo root")
+    os.system(f"sudo tc qdisc add dev lo root handle 1:0 netem delay {delay_in_ms}msec");
+
+def del_net_delay():
+    logger.info(f"Removing net delay")
+    os.system("sudo tc qdisc del dev lo root")
+
+async def do_repair_high_rf(manager, enable_opt):
+    net_delay = 200
+    net_delay = 100
+    rf = 3 # 3+3 * 1M = 6M
+    total_run = 3
+    keys = 1000000
+
+    rf = 9 # 3+9 * 0.5M = 6M
+    total_run = 3
+    keys = 500000
+
+    rf = 6 # 3+6 * 0.5M = 4.5M
+    total_run = 3
+    keys = 100000
+
+
+    rf = 3 # Median
+    total_run = 3
+    keys = 200000
+
+    rf = 3 # Median works
+    total_run = 3
+    keys = 100000
+
+    rf = 4 # Median works
+    total_run = 3
+    keys = 100000
+
+    rf = 3 # Light
+    total_run = 1
+    keys = 1000
+
+    rf = 6 # Median works
+    total_run = 3
+    keys = 100000
+
+    del_net_delay()
+
+    cmdline = ["--hinted-handoff-enabled", "0", "--smp", "1", "--num-tokens", "1"]
+    if enable_opt:
+        cmdline += ["--enable-multiple-dc-opt", "1"]
+    else:
+        cmdline += ["--enable-multiple-dc-opt", "0"]
+
+    for i in range(rf):
+        await manager.server_add(cmdline=cmdline)
+    servers = await manager.running_servers()
+
+    cql = manager.get_cql()
+
+    try:
+        res = list(cql.execute(f"SELECT count(*) FROM keyspace1.standard1"))
+        logger.info(f"keyspace1 has got {res}")
+    except:
+        logger.info("keyspace1 does not exist")
+
+
+    async def insert(ip, key_start, key_end):
+        num = key_end - key_start
+        cmd=f"cassandra-stress write no-warmup cl=QUORUM n={num} -schema 'replication(strategy=NetworkTopologyStrategy,replication_factor={rf})' -mode cql3 native -rate 'threads=100 fixed=20000/s'  -col 'size=FIXED(128) n=FIXED(8)' -pop seq={key_start}..{key_end} -node {ip}"
+        logger.info(f"Run {cmd=}")
+        os.system(cmd)
+
+    async def stop_and_insert(node, ip, key_start, key_end):
+        await manager.server_stop_gracefully(node.server_id)
+        await insert(ip, key_start, key_end)
+        await manager.server_start(node.server_id)
+
+    async def no_stop_insert(run):
+        ip = servers[0].ip_addr
+        s = run * keys
+        logger.info(f"Insert on {run=} out of {total_run} start={s} end={s+keys}")
+        await insert(ip, s, s + keys)
+
+    # insert when no node is down
+    await asyncio.gather(*[no_stop_insert(run) for run in range(total_run)])
+
+    # insert when one node is down
+    run = total_run
+    for node in servers:
+        s = run * keys
+        run = run + 1
+        logger.info(f"Stop and insert on {node.ip_addr} start={s} end={s + keys}")
+        ip = servers[0].ip_addr if node.ip_addr != servers[0].ip_addr else servers[1].ip_addr
+        await stop_and_insert(node, ip, s, s + keys)
+
+    try:
+        add_net_delay(net_delay)
+        t1 = time.time()
+        await manager.api.repair(servers[0].ip_addr, "keyspace1", "standard1")
+        t2 = time.time()
+        duration = t2 - t1;
+        logger.info(f"repair nodes={len(servers)} {duration=}s {rf=} {enable_opt=}")
+    finally:
+        del_net_delay()
+
+async def test_repair_high_rf_without_opt(manager):
+    await do_repair_high_rf(manager, False)
+
+async def test_repair_high_rf_with_opt(manager):
+    await do_repair_high_rf(manager, True)

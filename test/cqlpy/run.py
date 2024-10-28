@@ -272,7 +272,7 @@ def run_scylla_cmd(pid, dir):
         '--developer-mode', '1',
         '--ring-delay-ms', '0',
         '--collectd', '0',
-        '--smp', '2',
+        '--smp', '1',
         '-m', '1G',
         '--overprovisioned',
         '--max-networking-io-control-blocks=1000',

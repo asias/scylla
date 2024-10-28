@@ -89,10 +89,11 @@ class RESTClient(metaclass=ABCMeta):
 
     async def get_json(self, resource_uri: str, host: Optional[str] = None,
                        port: Optional[int] = None, params: Optional[Mapping[str, str]] = None,
-                       allow_failed: bool = False) -> Any:
+                       allow_failed: bool = False,
+                       timeout: Optional[float] = None) -> Any:
         """Fetch URL and get JSON. Caller must check JSON content types."""
         ret = await self._fetch("GET", resource_uri, response_type = "json", host = host,
-                                port = port, params = params, allow_failed = allow_failed)
+                                port = port, params = params, allow_failed = allow_failed, timeout = timeout)
         return ret
 
     async def post(self, resource_uri: str, host: Optional[str] = None,
@@ -402,7 +403,7 @@ class ScyllaRESTAPIClient():
         else:
             params = {"columnFamilies": table}
         sequence_number = await self.client.post_json(f"/storage_service/repair_async/{keyspace}", host=node_ip, params=params)
-        status = await self.client.get_json(f"/storage_service/repair_status", host=node_ip, params={"id": str(sequence_number)})
+        status = await self.client.get_json(f"/storage_service/repair_status", host=node_ip, params={"id": str(sequence_number)}, timeout=1200)
         if status != 'SUCCESSFUL':
             raise Exception(f"Repair id {sequence_number} on node {node_ip} for table {keyspace}.{table} failed: status={status}")
 

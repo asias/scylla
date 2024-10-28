@@ -336,6 +336,7 @@ public:
     named_value<sstring> replace_address_first_boot;
     named_value<sstring> ignore_dead_nodes_for_replace;
     named_value<bool> override_decommission;
+    named_value<bool> enable_multiple_dc_opt;
     named_value<bool> enable_repair_based_node_ops;
     named_value<sstring> allowed_repair_based_node_ops;
     named_value<bool> enable_compacting_data_for_streaming_and_repair;
