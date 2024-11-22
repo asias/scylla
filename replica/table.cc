@@ -581,7 +581,7 @@ void table::add_maintenance_sstable(compaction_group& cg, sstables::shared_sstab
 }
 
 void table::do_update_off_strategy_trigger() {
-    _off_strategy_trigger.rearm(timer<>::clock::now() +  std::chrono::minutes(5));
+    _off_strategy_trigger.rearm(timer<>::clock::now() +  std::chrono::minutes(1));
 }
 
 // If there are more sstables to be added to the off-strategy sstable set, call
