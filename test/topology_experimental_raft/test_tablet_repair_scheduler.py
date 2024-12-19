@@ -143,12 +143,12 @@ async def test_tablet_repair_error_delete(manager: ManagerClient):
         tablet_task_id = None
         while tablet_task_id == None:
             tablet_task_id = await get_tablet_task_id(cql, hosts[0], table_id, token)
-        status = None
-        while status == None:
-            try:
-                status = await manager.api.get_task_status(servers[0].ip_addr, tablet_task_id)
-            except:
-                status == None
+        # status = None
+        # while status == None:
+        #     try:
+        #         status = await manager.api.get_task_status(servers[0].ip_addr, tablet_task_id)
+        #     except:
+        #         status == None
         await manager.api.abort_task(servers[0].ip_addr, tablet_task_id)
 
     await asyncio.gather(repair_task(), del_repair_task());
