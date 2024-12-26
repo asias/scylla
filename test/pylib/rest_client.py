@@ -396,6 +396,19 @@ class ScyllaRESTAPIClient():
         data = await self.client.get_json("/raft/leader_host", host=node_ip, params=params)
         return HostID(data)
 
+    async def generate_data(self, node_ip, keyspace, table, start_key, end_key, column_size, drop_ratio):
+        """
+        Generate data on the node.
+        """
+        params = {"keyspace": keyspace,
+                  "table": table,
+                  "start_key": start_key,
+                  "end_key": end_key,
+                  "column_size": column_size,
+                  "drop_ratio": drop_ratio
+                  }
+        await self.client.post_json(f"/storage_service/generate_data", host=node_ip, params=params, timeout = 3600)
+
     async def repair(self, node_ip: str, keyspace: str, table: str, ranges: str = '') -> None:
         """Repair the given table and wait for it to complete"""
         if ranges:

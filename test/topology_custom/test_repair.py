@@ -233,13 +233,69 @@ def add_net_delay(delay_in_ms=50):
         logger.info(f"Skipped adding net delay {delay_in_ms=}")
         return
     logger.info(f"Adding net delay {delay_in_ms=}")
-    os.system("sudo modprobe sch_netem");
-    os.system("sudo tc qdisc del dev lo root")
-    os.system(f"sudo tc qdisc add dev lo root handle 1:0 netem delay {delay_in_ms}msec");
+    ret = os.system("sudo modprobe sch_netem");
+    assert ret == 0
+    ret = os.system("sudo tc qdisc del dev lo root")
+    ret = os.system(f"sudo tc qdisc add dev lo root handle 1:0 netem delay {delay_in_ms}msec");
+    assert ret == 0
 
 def del_net_delay():
     logger.info(f"Removing net delay")
-    os.system("sudo tc qdisc del dev lo root")
+    ret = os.system("sudo tc qdisc del dev lo root")
+
+async def do_repair_high_rf_with_gen_data(manager, enable_opt):
+    net_delay = 0
+    net_delay = 200
+    net_delay = 50
+    net_delay = 0
+    net_delay = 30
+    rf = 4
+    rf = 3
+    keyspace = 'test'
+    table = 'test'
+    key_nr = 10000000
+    key_nr = 5000000
+    key_nr = 1000000
+    start_key = 1
+    end_key = key_nr
+    column_size = 34
+    drop_ratio = 0.05
+    enable_tablets = 'false'
+
+    del_net_delay()
+
+    cmdline = ["--hinted-handoff-enabled", "0", "--smp", "1", "--num-tokens", "1"]
+    if enable_opt:
+        cmdline += ["--enable-multiple-dc-opt", "1"]
+    else:
+        cmdline += ["--enable-multiple-dc-opt", "0"]
+
+    for i in range(rf):
+        await manager.server_add(cmdline=cmdline)
+    servers = await manager.running_servers()
+
+    cql = manager.get_cql()
+
+    await cql.run_async("CREATE KEYSPACE test WITH replication = {{'class': 'NetworkTopologyStrategy', "
+                                          "'replication_factor': {}}} AND tablets = {{'enabled': {}}};".format(rf, enable_tablets))
+    await cql.run_async("CREATE TABLE test.test (pk blob PRIMARY KEY, c0 blob, c1 blob, c2 blob) WITH tombstone_gc = {'mode':'repair'};")
+
+
+    async def insert_data(server):
+        await manager.api.generate_data(server.ip_addr, keyspace, table, start_key, end_key, column_size, drop_ratio)
+
+    await asyncio.gather(*[insert_data(server) for server in servers])
+
+    try:
+        if net_delay > 0:
+            add_net_delay(net_delay)
+        t1 = time.time()
+        await manager.api.repair(servers[0].ip_addr, keyspace, table)
+        t2 = time.time()
+        duration = t2 - t1;
+        logger.info(f"repair nodes={len(servers)} {duration=}s {key_nr=} {rf=} {net_delay=}ms {enable_opt=}")
+    finally:
+        del_net_delay()
 
 async def do_repair_high_rf(manager, enable_opt):
     net_delay = 200
@@ -337,8 +393,8 @@ async def do_repair_high_rf(manager, enable_opt):
     finally:
         del_net_delay()
 
-async def test_repair_high_rf_without_opt(manager):
-    await do_repair_high_rf(manager, False)
+# async def test_repair_high_rf_without_opt(manager):
+#     await do_repair_high_rf_with_gen_data(manager, False)
 
 async def test_repair_high_rf_with_opt(manager):
-    await do_repair_high_rf(manager, True)
+    await do_repair_high_rf_with_gen_data(manager, True)

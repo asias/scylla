@@ -222,6 +222,17 @@ static const std::vector<row_level_diff_detect_algorithm>& suportted_diff_detect
     return _algorithms;
 };
 
+// static future<std::vector<std::chrono::microseconds>> get_latency(netw::messaging_service& ms, const inet_address_vector_replica_set& nodes) {
+//     std::vector<std::chrono::microseconds> latency;
+//     co_await parallel_for_each(std::views::iota(size_t(0), nodes.size()), coroutine::lambda([&] (size_t idx) -> future<> {
+//         auto start_time = std::chrono::steady_clock::now();
+//         co_await ms.send_repair_get_diff_algorithms(netw::messaging_service::msg_addr(nodes[idx]));
+//         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start_time);
+//         latency[idx] = duration;
+//     }));
+//     co_return latency;
+// }
+
 static row_level_diff_detect_algorithm get_common_diff_detect_algorithm(netw::messaging_service& ms, const inet_address_vector_replica_set& nodes) {
     std::vector<std::vector<row_level_diff_detect_algorithm>> nodes_algorithms(nodes.size());
     parallel_for_each(std::views::iota(size_t(0), nodes.size()), coroutine::lambda([&] (size_t idx) -> future<> {
@@ -2645,6 +2656,7 @@ class row_level_repair {
     table_id _table_id;
     dht::token_range _range;
     inet_address_vector_replica_set _all_live_peer_nodes;
+    std::vector<std::chrono::microseconds> _all_live_peer_nodes_latency;
     std::vector<std::optional<shard_id>> _all_live_peer_shards;
     bool _small_table_optimization;
 
@@ -2919,17 +2931,104 @@ private:
                 }
             }
 #endif
+            
+#if 1
+            // Consider latency
+            auto nr_peers = _all_live_peer_nodes.size();
+            if (_all_live_peer_nodes_latency.empty()) {
+                _all_live_peer_nodes_latency.resize(nr_peers);
+                parallel_for_each(std::views::iota(size_t(0), nr_peers), coroutine::lambda([&] (size_t node_idx) -> future<> {
+                    auto& node = _all_live_peer_nodes[node_idx];
+                    auto start_time = std::chrono::steady_clock::now();
+                    co_await _shard_task.messaging.local().send_repair_get_diff_algorithms(netw::messaging_service::msg_addr(node));
+                    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start_time);
+                    _all_live_peer_nodes_latency[node_idx] = std::max(duration, std::chrono::microseconds(1));
+                })).get();
+            }
+
+            std::vector<size_t> set_diffs_size;
+            repair_hash_set total_set_diffs;
+            {
+                const repair_hash_set& latest = master_row_hash_sets;
+                for (size_t idx = 0; idx < nr_peers; idx++) {
+                    const auto &peer_set= master.peer_row_hash_sets(idx);
+                    auto diff = get_set_diff(peer_set, latest);
+                    set_diffs_size.push_back(diff.size());
+                    if (total_set_diffs.empty()) {
+                        total_set_diffs = std::move(diff);
+                    } else {
+                        for (auto& h : diff) {
+                            total_set_diffs.insert(h);
+                            thread::maybe_yield();
+                        }
+                    }
+                }
+            }
+
+            using time_type = std::chrono::microseconds;
+            std::vector<repair_hash_set> pull_from_peers(nr_peers);
+            std::vector<time_type> times(nr_peers);
+            std::vector<time_type> total_times(nr_peers);
+            for (auto& v : total_set_diffs) {
+                for (size_t i = 0; i < nr_peers; i++) {
+                    thread::maybe_yield();
+                    const auto &peer_set= master.peer_row_hash_sets(i);
+                    if (peer_set.contains(v)) {
+                        times[i] = total_times[i] + _all_live_peer_nodes_latency[i];
+                    } else {
+                        times[i] = time_type::max();
+                    }
+                }
+                auto it = std::min_element(times.begin(), times.end());
+                auto idx = std::distance(times.begin(), it);
+                total_times[idx]= times[idx];
+                pull_from_peers[idx].emplace(v);
+                rlogger.trace("Time after adding value={} times={} total_times={} pull_from={}", v, times, total_times, idx);
+            }
+            std::vector<size_t> pull_from_peers_size;
+            for (auto& x: pull_from_peers) {
+                pull_from_peers_size.push_back(x.size());
+            }
+            rlogger.info("Get rows from peer set_diffs_size={} pull_from_peers_size={} total_set_diffs={} times={} total_times={} latency={}",
+                    set_diffs_size, pull_from_peers_size, total_set_diffs.size(), times, total_times, _all_live_peer_nodes_latency);
+
+#else
+            // Not consider latency
+            std::vector<size_t> set_diffs_size_origin;
+            repair_hash_set total_set_diffs;
+            {
+                const repair_hash_set& latest = master_row_hash_sets;
+                for (size_t idx = 0; idx < _all_live_peer_nodes.size(); idx++) {
+                    const auto &peer_set= master.peer_row_hash_sets(idx);
+                    auto diff = get_set_diff(peer_set, latest);
+                    set_diffs_size_origin.push_back(diff.size());
+                    if (total_set_diffs.empty()) {
+                        total_set_diffs = std::move(diff);
+                    } else {
+                        for (auto& h : diff) {
+                            total_set_diffs.insert(h);
+                            thread::maybe_yield();
+                        }
+                    }
+                }
+            }
+
             std::vector<repair_hash_set> set_diffs;
+            std::vector<size_t> set_diffs_size;
             repair_hash_set latest = std::move(master_row_hash_sets);
             for (size_t idx = 0; idx < _all_live_peer_nodes.size(); idx++) {
                 const auto &peer_set= master.peer_row_hash_sets(idx);
                 auto diff = get_set_diff(peer_set, latest);
                 set_diffs.push_back(diff);
+                set_diffs_size.push_back(diff.size());
                 for (const auto& hash : peer_set) {
                     latest.insert(hash);
                     thread::maybe_yield();
                 }
             }
+            rlogger.info("Get rows from peer set_diffs_size={} set_diffs_size_origin={} total_set_diffs={}", set_diffs_size, set_diffs_size_origin, total_set_diffs.size());
+#endif
+
 
             // Get rows from peer
             parallel_for_each(std::views::iota(size_t(0), _all_live_peer_nodes.size()), coroutine::lambda([&] (size_t node_idx) -> future<> {
@@ -2937,7 +3036,8 @@ private:
                 auto& node = _all_live_peer_nodes[node_idx];
                 auto dst_cpu_id = ns.shard;
                 //repair_hash_set set_diff = co_await get_set_diff_coroutine(master.peer_row_hash_sets(node_idx), peer_row_hash_sets_for_sync_rows[node_idx]);
-                repair_hash_set& set_diff = set_diffs[node_idx];
+                //repair_hash_set& set_diff = set_diffs[node_idx];
+                repair_hash_set& set_diff = pull_from_peers[node_idx];
                 auto needs_all_rows = repair_meta::needs_all_rows_t(set_diff.size() == master.peer_row_hash_sets(node_idx).size());
                 // Get rows from peer
                 ns.state = repair_state::get_row_diff_with_rpc_stream_started;
@@ -2945,7 +3045,7 @@ private:
                 ns.state = repair_state::get_row_diff_with_rpc_stream_finished;
             })).get();
 
-            utils::clear_gently(latest).get();
+            // utils::clear_gently(latest).get();
 
             master.flush_rows_in_working_row_buf(get_erm(), _small_table_optimization);
             return op_status::next_step;
