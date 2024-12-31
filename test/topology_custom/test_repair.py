@@ -393,8 +393,8 @@ async def do_repair_high_rf(manager, enable_opt):
     finally:
         del_net_delay()
 
-# async def test_repair_high_rf_without_opt(manager):
-#     await do_repair_high_rf_with_gen_data(manager, False)
+async def test_repair_high_rf_without_opt(manager):
+    await do_repair_high_rf_with_gen_data(manager, False)
 
 async def test_repair_high_rf_with_opt(manager):
     await do_repair_high_rf_with_gen_data(manager, True)
