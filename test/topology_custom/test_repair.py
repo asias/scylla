@@ -254,8 +254,8 @@ async def do_repair_high_rf_with_gen_data(manager, enable_opt):
     keyspace = 'test'
     table = 'test'
     key_nr = 10000000
-    key_nr = 5000000
     key_nr = 1000000 # 16 Get rows call
+    key_nr = 5000000
     start_key = 1
     end_key = key_nr
     column_size = 34
