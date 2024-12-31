@@ -2935,52 +2935,92 @@ private:
                 })).get();
             }
 
-            std::vector<size_t> set_diffs_size;
-            repair_hash_set total_set_diffs;
+            struct sync_meta {
+                struct peer {
+                    size_t set_diffs_size;
+                    repair_hash_set pull_from_peer;
+                    std::chrono::microseconds time;
+                    std::chrono::microseconds total_time;
+                };
+                std::vector<peer> peers;
+                repair_hash_set total_set_diffs;
+                sync_meta(size_t nr_peers)
+                : peers(nr_peers) {}
+                std::vector<size_t> get_pull_from_peers_size () const {
+                    std::vector<size_t> ret;
+                    for (auto& peer : peers) {
+                        ret.push_back(peer.pull_from_peer.size());
+                    }
+                    return ret;
+                }
+                std::vector<size_t> get_set_diffs_size () const {
+                    std::vector<size_t> ret;
+                    for (auto& peer : peers) {
+                        ret.push_back(peer.set_diffs_size);
+                    }
+                    return ret;
+                }
+                std::vector<std::chrono::microseconds> get_total_time () const {
+                    std::vector<std::chrono::microseconds> ret;
+                    for (auto& peer : peers) {
+                        ret.push_back(peer.total_time);
+                    }
+                    return ret;
+                }
+                std::vector<std::chrono::microseconds> get_time () const {
+                    std::vector<std::chrono::microseconds> ret;
+                    for (auto& peer : peers) {
+                        ret.push_back(peer.time);
+                    }
+                    return ret;
+                }
+            };
+
+            // auto fmt::formatter<sync_meta>::format(const sync_meta& sm, fmt::format_context& ctx) const
+            //         -> decltype(ctx.out()) {
+            //     return  fmt::format_to(ctx.out(), "{}[{}]: ignore_nodes={}, leaving_nodes={}, replace_nodes={}, bootstrap_nodes={}, repair_tables={}",
+            //             req.cmd, req.ops_uuid, req.ignore_nodes, req.leaving_nodes, req.replace_nodes, req.bootstrap_nodes, req.repair_tables);
+            // }
+
+            sync_meta sm(nr_peers);
+
             {
                 const repair_hash_set& latest = master_row_hash_sets;
                 for (size_t idx = 0; idx < nr_peers; idx++) {
                     const auto &peer_set= master.peer_row_hash_sets(idx);
                     auto diff = get_set_diff(peer_set, latest);
-                    set_diffs_size.push_back(diff.size());
-                    if (total_set_diffs.empty()) {
-                        total_set_diffs = std::move(diff);
+                    sm.peers[idx].set_diffs_size = diff.size();
+                    if (sm.total_set_diffs.empty()) {
+                        sm.total_set_diffs = std::move(diff);
                     } else {
                         for (auto& h : diff) {
-                            total_set_diffs.insert(h);
+                            sm.total_set_diffs.insert(h);
                             thread::maybe_yield();
                         }
                     }
                 }
             }
 
-            using time_type = std::chrono::microseconds;
-            std::vector<repair_hash_set> pull_from_peers(nr_peers);
-            std::vector<time_type> times(nr_peers);
-            std::vector<time_type> total_times(nr_peers);
-            for (auto& v : total_set_diffs) {
+            for (const auto& v : sm.total_set_diffs) {
                 for (size_t i = 0; i < nr_peers; i++) {
                     thread::maybe_yield();
                     const auto &peer_set= master.peer_row_hash_sets(i);
+                    auto& time = sm.peers[i].time;
+                    auto& total_time = sm.peers[i].total_time;
                     if (peer_set.contains(v)) {
-                        times[i] = total_times[i] + _all_live_peer_nodes_latency[i];
+                        time = total_time + _all_live_peer_nodes_latency[i];
                     } else {
-                        times[i] = time_type::max();
+                        time = std::chrono::microseconds::max();
                     }
                 }
-                auto it = std::min_element(times.begin(), times.end());
-                auto idx = std::distance(times.begin(), it);
-                total_times[idx]= times[idx];
-                pull_from_peers[idx].emplace(v);
-                rlogger.trace("Time after adding value={} times={} total_times={} pull_from={}", v, times, total_times, idx);
-            }
-            std::vector<size_t> pull_from_peers_size;
-            for (auto& x: pull_from_peers) {
-                pull_from_peers_size.push_back(x.size());
+                auto it = std::min_element(sm.peers.begin(), sm.peers.end(), [] (auto& x, auto& y) { return x.time < y.time; });
+                auto idx = std::distance(sm.peers.begin(), it);
+                sm.peers[idx].total_time= sm.peers[idx].time;
+                sm.peers[idx].pull_from_peer.emplace(v);
+                rlogger.trace("Time after adding value={} times={} total_time={} pull_from={}", v, sm.get_time(), sm.get_total_time(), idx);
             }
             rlogger.info("Get rows from peer set_diffs_size={} pull_from_peers_size={} total_set_diffs={} times={} total_times={} latency={}",
-                    set_diffs_size, pull_from_peers_size, total_set_diffs.size(), times, total_times, _all_live_peer_nodes_latency);
-
+                    sm.get_set_diffs_size(), sm.get_pull_from_peers_size(), sm.total_set_diffs.size(), sm.get_time(), sm.get_total_time(), _all_live_peer_nodes_latency);
 #else
             // Not consider latency
             std::vector<size_t> set_diffs_size_origin;
@@ -3026,7 +3066,7 @@ private:
                 auto dst_cpu_id = ns.shard;
                 //repair_hash_set set_diff = co_await get_set_diff_coroutine(master.peer_row_hash_sets(node_idx), peer_row_hash_sets_for_sync_rows[node_idx]);
                 //repair_hash_set& set_diff = set_diffs[node_idx];
-                repair_hash_set& set_diff = pull_from_peers[node_idx];
+                repair_hash_set& set_diff = sm.peers[node_idx].pull_from_peer;
                 auto needs_all_rows = repair_meta::needs_all_rows_t(set_diff.size() == master.peer_row_hash_sets(node_idx).size());
                 // Get rows from peer
                 ns.state = repair_state::get_row_diff_with_rpc_stream_started;
