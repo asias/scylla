@@ -251,6 +251,7 @@ async def do_repair_high_rf_with_gen_data(manager, enable_opt):
     net_delay = 30
     rf = 4
     rf = 3
+    rf = 9
     keyspace = 'test'
     table = 'test'
     key_nr = 10000000
