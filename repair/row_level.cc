@@ -222,17 +222,6 @@ static const std::vector<row_level_diff_detect_algorithm>& suportted_diff_detect
     return _algorithms;
 };
 
-// static future<std::vector<std::chrono::microseconds>> get_latency(netw::messaging_service& ms, const inet_address_vector_replica_set& nodes) {
-//     std::vector<std::chrono::microseconds> latency;
-//     co_await parallel_for_each(std::views::iota(size_t(0), nodes.size()), coroutine::lambda([&] (size_t idx) -> future<> {
-//         auto start_time = std::chrono::steady_clock::now();
-//         co_await ms.send_repair_get_diff_algorithms(netw::messaging_service::msg_addr(nodes[idx]));
-//         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start_time);
-//         latency[idx] = duration;
-//     }));
-//     co_return latency;
-// }
-
 static row_level_diff_detect_algorithm get_common_diff_detect_algorithm(netw::messaging_service& ms, const inet_address_vector_replica_set& nodes) {
     std::vector<std::vector<row_level_diff_detect_algorithm>> nodes_algorithms(nodes.size());
     parallel_for_each(std::views::iota(size_t(0), nodes.size()), coroutine::lambda([&] (size_t idx) -> future<> {
