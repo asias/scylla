@@ -249,14 +249,14 @@ async def do_repair_high_rf_with_gen_data(manager, enable_opt):
     net_delay = 50
     net_delay = 0
     net_delay = 30
+    rf = 9
     rf = 4
     rf = 3
-    rf = 9
     keyspace = 'test'
     table = 'test'
     key_nr = 10000000
-    key_nr = 1000000 # 16 Get rows call
     key_nr = 5000000
+    key_nr = 1000000 # 16 Get rows call
     start_key = 1
     end_key = key_nr
     column_size = 34
@@ -265,7 +265,7 @@ async def do_repair_high_rf_with_gen_data(manager, enable_opt):
 
     del_net_delay()
 
-    cmdline = ["--hinted-handoff-enabled", "0", "--smp", "1", "--num-tokens", "1"]
+    cmdline = ["--hinted-handoff-enabled", "0", "--smp", "7", "--num-tokens", "1", "-m",  "16G"]
     if enable_opt:
         cmdline += ["--enable-multiple-dc-opt", "1"]
     else:
@@ -394,8 +394,9 @@ async def do_repair_high_rf(manager, enable_opt):
     finally:
         del_net_delay()
 
+async def test_repair_high_rf_with_opt(manager):
+    await do_repair_high_rf_with_gen_data(manager, True)
+
 async def test_repair_high_rf_without_opt(manager):
     await do_repair_high_rf_with_gen_data(manager, False)
 
-async def test_repair_high_rf_with_opt(manager):
-    await do_repair_high_rf_with_gen_data(manager, True)

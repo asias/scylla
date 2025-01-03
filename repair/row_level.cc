@@ -68,6 +68,8 @@ extern logging::logger rlogger;
 
 static bool inject_rpc_stream_error = false;
 
+using duration_time_type = std::chrono::milliseconds;
+
 static shard_id get_dst_shard_id(uint32_t src_cpu_id, const rpc::optional<shard_id>& dst_cpu_id_opt) {
     uint32_t dst_cpu_id = 0;
     if (dst_cpu_id_opt && *dst_cpu_id_opt != repair_unspecified_shard) {
@@ -731,6 +733,8 @@ private:
     std::unique_ptr<const locator::token_metadata> _small_table_optimization_tm;
     seastar::semaphore _small_table_optimization_tm_sem{1};
     bool _small_table_optimization_tm_calculated = false;
+public:
+    duration_time_type _step_flush_rows_duration{0};
 public:
     std::vector<repair_node_state>& all_nodes() {
         return _all_node_states;
@@ -2639,14 +2643,123 @@ static void add_to_repair_meta_for_followers(repair_meta& rm) {
     debug::repair_meta_for_followers.add(rm);
 }
 
+enum class duration_type_t {
+    get_combined_hashes,
+    get_hashes,
+    get_hashes_per_node,
+    cal_row_diff,
+    get_rows,
+    get_rows_per_node,
+    flush_rows,
+    put_rows,
+    step_negotiate_sb,
+    step_get_rows,
+    step_put_rows,
+    step_all,
+};
+
+template <>
+struct fmt::formatter<duration_type_t> : fmt::formatter<string_view> {
+    auto format(const duration_type_t&, fmt::format_context& ctx) const -> decltype(ctx.out());
+};
+auto fmt::formatter<duration_type_t>::format(const duration_type_t& type, fmt::format_context& ctx) const
+        -> decltype(ctx.out()) {
+    std::string_view name;
+    switch (type) {
+        case duration_type_t::get_combined_hashes:
+            name = "get_combined_hashes"; break;
+        case duration_type_t::get_hashes:
+            name = "get_hashes"; break;
+        case duration_type_t::get_hashes_per_node:
+            name = "get_hashes_per_node"; break;
+        case duration_type_t::cal_row_diff:
+            name = "cal_row_diff"; break;
+        case duration_type_t::get_rows:
+            name = "get_rows"; break;
+        case duration_type_t::get_rows_per_node:
+            name = "get_rows_per_node"; break;
+        case duration_type_t::flush_rows:
+            name = "flush_rows"; break;
+        case duration_type_t::put_rows:
+            name = "put_rows"; break;
+        case duration_type_t::step_negotiate_sb:
+            name = "step_negotiate_sb"; break;
+        case duration_type_t::step_get_rows:
+            name = "step_get_rows"; break;
+        case duration_type_t::step_put_rows:
+            name = "step_put_rows"; break;
+        case duration_type_t::step_all:
+            name = "step_all"; break;
+    }
+    return fmt::format_to(ctx.out(), "{}", name);
+}
+
+struct duration_value {
+    std::chrono::steady_clock::time_point start_time;
+    duration_time_type duration{0};
+    duration_time_type total_duration{0};
+};
+
+struct duration_tracker {
+    repair_uniq_id id;
+    std::unordered_map<duration_type_t, duration_value> map;
+    duration_tracker(repair_uniq_id id)
+    : id(id)
+    {}
+    void start(duration_type_t type) {
+        map[type].start_time = std::chrono::steady_clock::now();
+    }
+    duration_time_type stop(duration_type_t type, std::optional<gms::inet_address> node = std::nullopt, std::optional<size_t> nr = std::nullopt) {
+        auto& x = map[type];
+        auto duration = std::chrono::duration_cast<duration_time_type>(std::chrono::steady_clock::now() - x.start_time);
+        x.duration = duration;
+        x.total_duration += duration;
+        if (node) {
+            rlogger.info("[{}] duration_tracker: Add duration={} total_duration={} type={} node={} nr={}", id.uuid(), x.duration.count(), x.total_duration.count(), type, *node, nr);
+        } else {
+            rlogger.info("[{}] duration_tracker: Add duration={} total_duration={} type={}", id.uuid(), x.duration.count(), x.total_duration.count(), type);
+        }
+        return duration;
+    }
+    duration_value get(duration_type_t type) const {
+        auto it = map.find(type);
+        if (it == map.end()) {
+            return duration_value();
+        }
+        return it->second;
+    }
+};
+
+template <>
+struct fmt::formatter<duration_tracker> : fmt::formatter<string_view> {
+    auto format(const duration_tracker&, fmt::format_context& ctx) const -> decltype(ctx.out());
+};
+
+auto fmt::formatter<duration_tracker>::format(const duration_tracker& t, fmt::format_context& ctx) const
+        -> decltype(ctx.out()) {
+    return fmt::format_to(ctx.out(), "repair_id={} step_negotiate_sb={} step_get_rows={} step_put_rows={} get_hashes={} get_rows={} put_rows={} step_all={}",
+            t.id.uuid(),
+            t.get(duration_type_t::step_negotiate_sb).total_duration.count(),
+            t.get(duration_type_t::step_get_rows).total_duration.count(),
+            t.get(duration_type_t::step_put_rows).total_duration.count(),
+            t.get(duration_type_t::get_hashes).total_duration.count(),
+            t.get(duration_type_t::get_rows).total_duration.count(),
+            t.get(duration_type_t::put_rows).total_duration.count(),
+            t.get(duration_type_t::step_all).total_duration.count());
+}
+
 class row_level_repair {
     repair::shard_repair_task_impl& _shard_task;
     sstring _cf_name;
     table_id _table_id;
     dht::token_range _range;
     inet_address_vector_replica_set _all_live_peer_nodes;
-    std::vector<std::chrono::microseconds> _all_live_peer_nodes_latency;
+    std::vector<duration_time_type> _all_live_peer_nodes_latency;
     std::vector<std::optional<shard_id>> _all_live_peer_shards;
+    duration_time_type _step_negotiate_sync_boundary_duration{0};
+    duration_time_type _step_get_rows_duration{0};
+    duration_time_type _step_put_rows_duration{0};
+    duration_time_type _step_get_hashes_duration{0};
     bool _small_table_optimization;
 
     // Repair master and followers will propose a sync boundary. Each of them
@@ -2691,6 +2804,7 @@ class row_level_repair {
     gc_clock::time_point _start_time;
 
     bool _is_tablet;
+    duration_tracker _duration_tracker;
 
 public:
     row_level_repair(repair::shard_repair_task_impl& shard_task,
@@ -2709,6 +2823,7 @@ public:
         , _seed(get_random_seed())
         , _start_time(start_time)
         , _is_tablet(_shard_task.db.local().find_column_family(_table_id).uses_tablets())
+        , _duration_tracker(_shard_task.global_repair_id)
     {
         repair_neighbors r_neighbors = _shard_task.get_repair_neighbors(_range);
         auto& map = r_neighbors.shard_map;
@@ -2748,6 +2863,10 @@ private:
 
     // Step A: Negotiate sync boundary to use
     op_status negotiate_sync_boundary(repair_meta& master) {
+        _duration_tracker.start(duration_type_t::step_negotiate_sb);
+        auto add_duration = defer([&] {
+            _duration_tracker.stop(duration_type_t::step_negotiate_sb);
+        });
         _shard_task.check_in_abort_or_shutdown();
         _sync_boundaries.clear();
         _combined_hashes.clear();
@@ -2814,6 +2933,10 @@ private:
 
     // Step B: Get missing rows from peer nodes so that local node contains all the rows
     op_status get_missing_rows_from_follower_nodes(repair_meta& master) {
+        _duration_tracker.start(duration_type_t::step_get_rows);
+        auto add_duration = defer([&] {
+            _duration_tracker.stop(duration_type_t::step_get_rows);
+        });
         _shard_task.check_in_abort_or_shutdown();
         // `combined_hashes` contains the combined hashes for the
         // `_working_row_buf`. Like `_row_buf`, `_working_row_buf` contains
@@ -2824,6 +2947,7 @@ private:
         // moved from the `_row_buf` to `_working_row_buf`.
         std::vector<repair_hash> combined_hashes;
         combined_hashes.resize(master.all_nodes().size());
+        _duration_tracker.start(duration_type_t::get_combined_hashes);
         parallel_for_each(std::views::iota(size_t(0), master.all_nodes().size()), coroutine::lambda([&] (size_t idx) -> future<> {
             // Request combined hashes from all nodes between (_last_sync_boundary, _current_sync_boundary]
             // Each node will
@@ -2851,6 +2975,7 @@ private:
                 std::rethrow_exception(ep);
             }
         })).get();
+        _duration_tracker.stop(duration_type_t::get_combined_hashes);
 
         // If all the peers has the same combined_hashes. This means they contain
         // the identical rows. So there is no need to sync for this sync boundary.
@@ -2889,6 +3014,7 @@ private:
                 }
             }
 #endif
+            _duration_tracker.start(duration_type_t::get_hashes);
             auto master_row_hash_sets = master.working_row_hashes().get();
             parallel_for_each(std::views::iota(size_t(0), _all_live_peer_nodes.size()), coroutine::lambda([&] (size_t node_idx) -> future<> {
 #if 1
@@ -2904,9 +3030,13 @@ private:
                 auto dst_cpu_id = ns.shard;
                 // Ask the peer to send the full list hashes in the working row buf.
                 ns.state = repair_state::get_full_row_hashes_with_rpc_stream_started;
+                _duration_tracker.start(duration_type_t::get_hashes_per_node);
                 master.peer_row_hash_sets(node_idx) = co_await master.get_full_row_hashes_with_rpc_stream(node, node_idx, dst_cpu_id);
+                auto nr = master.peer_row_hash_sets(node_idx).size();
+                _duration_tracker.stop(duration_type_t::get_hashes_per_node, node, nr);
                 ns.state = repair_state::get_full_row_hashes_with_rpc_stream_finished;
             })).get();
+            _duration_tracker.stop(duration_type_t::get_hashes);
 #if 1
             for (size_t node_idx = 1 ; node_idx < combined_hashes.size(); node_idx++) {
                 auto& sync_info = sync_infos[node_idx];
@@ -2920,7 +3050,7 @@ private:
                 }
             }
 #endif
-            
+
 #if 1
             // Consider latency
             auto nr_peers = _all_live_peer_nodes.size();
@@ -2930,8 +3060,8 @@ private:
                     auto& node = _all_live_peer_nodes[node_idx];
                     auto start_time = std::chrono::steady_clock::now();
                     co_await _shard_task.messaging.local().send_repair_get_diff_algorithms(netw::messaging_service::msg_addr(node));
-                    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start_time);
-                    _all_live_peer_nodes_latency[node_idx] = std::max(duration, std::chrono::microseconds(1));
+                    auto duration = std::chrono::duration_cast<duration_time_type>(std::chrono::steady_clock::now() - start_time);
+                    _all_live_peer_nodes_latency[node_idx] = std::max(duration, duration_time_type(1));
                 })).get();
             }
 
@@ -2939,8 +3069,8 @@ private:
                 struct peer {
                     size_t set_diffs_size;
                     repair_hash_set pull_from_peer;
-                    std::chrono::microseconds time;
-                    std::chrono::microseconds total_time;
+                    duration_time_type time;
+                    duration_time_type total_time;
                 };
                 std::vector<peer> peers;
                 repair_hash_set total_set_diffs;
@@ -2960,15 +3090,15 @@ private:
                     }
                     return ret;
                 }
-                std::vector<std::chrono::microseconds> get_total_time () const {
-                    std::vector<std::chrono::microseconds> ret;
+                std::vector<duration_time_type> get_total_time () const {
+                    std::vector<duration_time_type> ret;
                     for (auto& peer : peers) {
                         ret.push_back(peer.total_time);
                     }
                     return ret;
                 }
-                std::vector<std::chrono::microseconds> get_time () const {
-                    std::vector<std::chrono::microseconds> ret;
+                std::vector<duration_time_type> get_time () const {
+                    std::vector<duration_time_type> ret;
                     for (auto& peer : peers) {
                         ret.push_back(peer.time);
                     }
@@ -2976,14 +3106,8 @@ private:
                 }
             };
 
-            // auto fmt::formatter<sync_meta>::format(const sync_meta& sm, fmt::format_context& ctx) const
-            //         -> decltype(ctx.out()) {
-            //     return  fmt::format_to(ctx.out(), "{}[{}]: ignore_nodes={}, leaving_nodes={}, replace_nodes={}, bootstrap_nodes={}, repair_tables={}",
-            //             req.cmd, req.ops_uuid, req.ignore_nodes, req.leaving_nodes, req.replace_nodes, req.bootstrap_nodes, req.repair_tables);
-            // }
-
+            _duration_tracker.start(duration_type_t::cal_row_diff);
             sync_meta sm(nr_peers);
-
             {
                 const repair_hash_set& latest = master_row_hash_sets;
                 for (size_t idx = 0; idx < nr_peers; idx++) {
@@ -3010,7 +3134,7 @@ private:
                     if (peer_set.contains(v)) {
                         time = total_time + _all_live_peer_nodes_latency[i];
                     } else {
-                        time = std::chrono::microseconds::max();
+                        time = duration_time_type::max();
                     }
                 }
                 auto it = std::min_element(sm.peers.begin(), sm.peers.end(), [] (auto& x, auto& y) { return x.time < y.time; });
@@ -3021,6 +3145,7 @@ private:
             }
             rlogger.info("Get rows from peer set_diffs_size={} pull_from_peers_size={} total_set_diffs={} times={} total_times={} latency={}",
                     sm.get_set_diffs_size(), sm.get_pull_from_peers_size(), sm.total_set_diffs.size(), sm.get_time(), sm.get_total_time(), _all_live_peer_nodes_latency);
+            _duration_tracker.stop(duration_type_t::cal_row_diff);
 #else
             // Not consider latency
             std::vector<size_t> set_diffs_size_origin;
@@ -3060,23 +3185,28 @@ private:
 
 
             // Get rows from peer
+            _duration_tracker.start(duration_type_t::get_rows);
             parallel_for_each(std::views::iota(size_t(0), _all_live_peer_nodes.size()), coroutine::lambda([&] (size_t node_idx) -> future<> {
                 auto& ns = master.all_nodes()[node_idx + 1];
                 auto& node = _all_live_peer_nodes[node_idx];
                 auto dst_cpu_id = ns.shard;
-                //repair_hash_set set_diff = co_await get_set_diff_coroutine(master.peer_row_hash_sets(node_idx), peer_row_hash_sets_for_sync_rows[node_idx]);
-                //repair_hash_set& set_diff = set_diffs[node_idx];
                 repair_hash_set& set_diff = sm.peers[node_idx].pull_from_peer;
                 auto needs_all_rows = repair_meta::needs_all_rows_t(set_diff.size() == master.peer_row_hash_sets(node_idx).size());
                 // Get rows from peer
                 ns.state = repair_state::get_row_diff_with_rpc_stream_started;
+                auto nr = set_diff.size();
+                _duration_tracker.start(duration_type_t::get_rows_per_node);
                 co_await master.get_row_diff_with_rpc_stream(std::move(set_diff), needs_all_rows, repair_meta::update_peer_row_hash_sets::no, node, node_idx, dst_cpu_id);
+                _duration_tracker.stop(duration_type_t::get_rows_per_node, node, nr);
                 ns.state = repair_state::get_row_diff_with_rpc_stream_finished;
             })).get();
+            _duration_tracker.stop(duration_type_t::get_rows);
 
             // utils::clear_gently(latest).get();
 
+            _duration_tracker.start(duration_type_t::flush_rows);
             master.flush_rows_in_working_row_buf(get_erm(), _small_table_optimization);
+            _duration_tracker.stop(duration_type_t::flush_rows);
             return op_status::next_step;
         }
 
@@ -3108,6 +3238,7 @@ private:
 
             // Fast path: if local has zero row and remote has rows, request them all.
             if (master.working_row_buf_combined_hash() == repair_hash() && combined_hashes[node_idx + 1] != repair_hash()) {
+                _duration_tracker.start(duration_type_t::get_rows);
                 master.peer_row_hash_sets(node_idx).clear();
                 if (master.use_rpc_stream()) {
                     rlogger.debug("FastPath: get_row_diff with needs_all_rows_t::yes rpc stream");
@@ -3120,11 +3251,14 @@ private:
                     master.get_row_diff_and_update_peer_row_hash_sets(node, node_idx, dst_cpu_id);
                     ns.state = repair_state::get_row_diff_and_update_peer_row_hash_sets_finished;
                 }
+                auto nr = master.peer_row_hash_sets(node_idx).size();
+                _duration_tracker.stop(duration_type_t::get_rows, node, nr);
                 continue;
             }
 
             rlogger.debug("Before master.get_full_row_hashes for node {}, hash_sets={}",
                 node, master.peer_row_hash_sets(node_idx).size());
+            _duration_tracker.start(duration_type_t::get_hashes);
             // Ask the peer to send the full list hashes in the working row buf.
             if (master.use_rpc_stream()) {
                 ns.state = repair_state::get_full_row_hashes_with_rpc_stream_started;
@@ -3137,6 +3271,8 @@ private:
             }
             rlogger.debug("After master.get_full_row_hashes for node {}, hash_sets={}",
                 node, master.peer_row_hash_sets(node_idx).size());
+            auto nr = master.peer_row_hash_sets(node_idx).size();
+            _duration_tracker.stop(duration_type_t::get_hashes, node, nr);
 
             // With hashes of rows from peer node, we can figure out
             // what rows repair master is missing. Note we get missing
@@ -3152,6 +3288,8 @@ private:
             // If we need to pull all rows from the peer. We can avoid
             // sending the row hashes on wire by setting needs_all_rows flag.
             auto needs_all_rows = repair_meta::needs_all_rows_t(set_diff.size() == master.peer_row_hash_sets(node_idx).size());
+            auto nr_rows = set_diff.size();
+            _duration_tracker.start(duration_type_t::get_rows);
             if (master.use_rpc_stream()) {
                 ns.state = repair_state::get_row_diff_with_rpc_stream_started;
                 master.get_row_diff_with_rpc_stream(std::move(set_diff), needs_all_rows, repair_meta::update_peer_row_hash_sets::no, node, node_idx, dst_cpu_id).get();
@@ -3162,18 +3300,25 @@ private:
                 ns.state = repair_state::get_row_diff_finished;
             }
             rlogger.debug("After get_row_diff node {}, hash_sets={}", master.myip(), master.working_row_hashes().get().size());
+            _duration_tracker.stop(duration_type_t::get_rows, node, nr_rows);
           } catch (...) {
             rlogger.warn("repair[{}]: get_row_diff: got error from node={}, keyspace={}, table={}, range={}, error={}",
                     _shard_task.global_repair_id.uuid(), node, _shard_task.get_keyspace(), _cf_name, _range, std::current_exception());
             throw;
           }
         }
+        _duration_tracker.start(duration_type_t::flush_rows);
         master.flush_rows_in_working_row_buf(get_erm(), _small_table_optimization);
+        _duration_tracker.stop(duration_type_t::flush_rows);
         return op_status::next_step;
     }
 
     // Step C: Send missing rows to the peer nodes
     void send_missing_rows_to_follower_nodes(repair_meta& master) {
+        _duration_tracker.start(duration_type_t::step_put_rows);
+        auto add_duration = defer([&] {
+            _duration_tracker.stop(duration_type_t::step_put_rows);
+        });
         // At this time, repair master contains all the rows between (_last_sync_boundary, _current_sync_boundary]
         // So we can figure out which rows peer node are missing and send the missing rows to them
         _shard_task.check_in_abort_or_shutdown();
@@ -3183,6 +3328,7 @@ private:
         for (size_t idx : std::views::iota(size_t(0), sz)) {
             set_diffs[idx] = get_set_diff(local_row_hash_sets, master.peer_row_hash_sets(idx));
         }
+        _duration_tracker.start(duration_type_t::put_rows);
         parallel_for_each(std::views::iota(size_t(0), sz), coroutine::lambda([&] (size_t idx) -> future<> {
             auto& ns = master.all_nodes()[idx + 1];
             auto dst_cpu_id = ns.shard;
@@ -3215,6 +3361,7 @@ private:
                 }
             }
         })).get();
+        _duration_tracker.stop(duration_type_t::put_rows);
         master.stats().round_nr_slow_path++;
     }
 
@@ -3286,10 +3433,10 @@ public:
             auto max = _shard_task.rs.max_repair_memory();
             auto wanted = (_all_live_peer_nodes.size() + 1) * repair::task_manager_module::max_repair_memory_per_range;
             wanted = std::min(max, wanted);
-            rlogger.trace("repair[{}]: Started to get memory budget, wanted={}, available={}, max_repair_memory={}",
+            rlogger.info("repair[{}]: Started to get memory budget, wanted={}, available={}, max_repair_memory={}",
                     _shard_task.global_repair_id.uuid(), wanted, mem_sem.current(), max);
             auto mem_permit = seastar::get_units(mem_sem, wanted).get();
-            rlogger.trace("repair[{}]: Finished to get memory budget, wanted={}, available={}, max_repair_memory={}",
+            rlogger.info("repair[{}]: Finished to get memory budget, wanted={}, available={}, max_repair_memory={}",
                     _shard_task.global_repair_id.uuid(), wanted, mem_sem.current(), max);
 
             auto permit = _shard_task.db.local().obtain_reader_permit(_shard_task.db.local().find_column_family(_table_id), "repair-meta", db::no_timeout, {}).get();
@@ -3322,8 +3469,9 @@ public:
                 }
             });
 
-            rlogger.debug(">>> Started Row Level Repair (Master): local={}, peers={}, repair_meta_id={}, keyspace={}, cf={}, schema_version={}, range={}, seed={}, max_row_buf_size={}",
+            rlogger.info(">>> Started Row Level Repair (Master): local={}, peers={}, repair_meta_id={}, keyspace={}, cf={}, schema_version={}, range={}, seed={}, max_row_buf_size={}",
                     master.myip(), _all_live_peer_nodes, master.repair_meta_id(), _shard_task.get_keyspace(), _cf_name, schema_version, _range, _seed, max_row_buf_size);
+            _duration_tracker.start(duration_type_t::step_all);
 
             std::exception_ptr ex = nullptr;
             std::vector<repair_node_state> nodes_to_stop;
@@ -3415,8 +3563,10 @@ public:
             } else {
                 update_system_repair_table().get();
             }
+            _duration_tracker.stop(duration_type_t::step_all);
             rlogger.debug("<<< Finished Row Level Repair (Master): local={}, peers={}, repair_meta_id={}, keyspace={}, cf={}, range={}, tx_hashes_nr={}, rx_hashes_nr={}, tx_row_nr={}, rx_row_nr={}, row_from_disk_bytes={}, row_from_disk_nr={}",
                     master.myip(), _all_live_peer_nodes, master.repair_meta_id(), _shard_task.get_keyspace(), _cf_name, _range, master.stats().tx_hashes_nr, master.stats().rx_hashes_nr, master.stats().tx_row_nr, master.stats().rx_row_nr, master.stats().row_from_disk_bytes, master.stats().row_from_disk_nr);
+            rlogger.info("<<< Finished Row Level Repair (Master): duration_tracker={} local={}, peers={}, repair_meta_id={}, keyspace={}, cf={}, range={}, tx_hashes_nr={}, rx_hashes_nr={}, tx_row_nr={}, rx_row_nr={}, row_from_disk_bytes={}, row_from_disk_nr={}", _duration_tracker, master.myip(), _all_live_peer_nodes, master.repair_meta_id(), _shard_task.get_keyspace(), _cf_name, _range, master.stats().tx_hashes_nr, master.stats().rx_hashes_nr, master.stats().tx_row_nr, master.stats().rx_row_nr, master.stats().row_from_disk_bytes, master.stats().row_from_disk_nr);
         });
     }
 };
